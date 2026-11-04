@@ -70,7 +70,14 @@ function drawJointDots(c, joints) {
 //              (origine = première articulation, axe x = direction de l'os). À chaque image,
 //              on reconvertit avec la position de l'os à ce moment-là → le trait suit le membre.
 
-let strokes = [];        // { kind, color, width, points, bone? }
+let strokes = [];        // { id, kind, color, width, points, bone? }
+let nextStrokeId = 1;
+
+// Chaque image garde la liste des traits CACHÉS sur elle (frame.hiddenStrokes).
+// Par défaut un trait est visible : les anciens fichiers n'ont pas cette liste, et tout s'affiche.
+function strokeVisible(f, s) {
+  return !(f.hiddenStrokes || []).includes(s.id);
+}
 let tool = 'move';       // outil actif : 'move', 'body', 'decor' ou 'erase'
 let drawing = null;      // points du trait en cours de dessin (ou null)
 
@@ -102,10 +109,169 @@ function toWorld(q, f) {
 
 // Où se trouvent les points d'un trait, pour une pose donnée
 // scale : taille du bonhomme → un chapeau grandit avec lui
-function strokeWorld(s, joints, scale = 1) {
-  if (s.kind === 'decor') return s.points;
-  const f = boneFrame(joints, s.bone, s.anchor);
-  return s.points.map((q) => toWorld({ x: q.x * scale, y: q.y * scale }, f));
+// f : l'image (ou l'image intermédiaire calculée pendant la lecture)
+function strokeWorld(s, f) {
+  if (s.kind === 'decor') {
+    // Décor : on applique la transformation de l'élément sur cette image (déplacé, tourné, étiré)
+    const t = tfOf(f, s.id);
+    if (t.x === 0 && t.y === 0 && t.angle === 0 && t.sx === 1 && t.sy === 1) return s.points;
+    const cos = Math.cos((t.angle * Math.PI) / 180);
+    const sin = Math.sin((t.angle * Math.PI) / 180);
+    const P = { x: s.pivot.x + t.x, y: s.pivot.y + t.y }; // où se trouve le centre de l'élément
+    return s.points.map((p) => {
+      const lx = (p.x - s.pivot.x) * t.sx;
+      const ly = (p.y - s.pivot.y) * t.sy;
+      return { x: P.x + lx * cos - ly * sin, y: P.y + lx * sin + ly * cos };
+    });
+  }
+  const scale = figScale(f);
+  const bf = boneFrame(f.joints, s.bone, s.anchor);
+  return s.points.map((q) => toWorld({ x: q.x * scale, y: q.y * scale }, bf));
+}
+
+// Épaisseur d'un trait sur une image (il s'épaissit si on l'agrandit)
+function strokeWidthIn(s, f) {
+  if (s.kind === 'body') return s.width * figScale(f);
+  const t = tfOf(f, s.id);
+  return s.width * Math.sqrt(Math.abs(t.sx * t.sy));
+}
+
+// ===== Animer les éléments du décor =====
+// Chaque image peut donner à un élément de décor sa propre transformation :
+//   frame.strokeTf = { s3: { x, y, angle, sx, sy } }
+//   x, y : décalage ; angle : rotation en degrés ; sx, sy : étirement en largeur / hauteur.
+// Ces nombres s'interpolent pendant la lecture, comme les articulations du bonhomme.
+// La rotation et l'étirement se font autour du « pivot » du trait (le centre où il a été dessiné).
+
+const IDENTITY_TF = { x: 0, y: 0, angle: 0, sx: 1, sy: 1 };
+
+function tfOf(f, id) {
+  return (f.strokeTf && f.strokeTf[id]) || IDENTITY_TF;
+}
+
+function setTf(f, id, t) {
+  f.strokeTf = { ...(f.strokeTf || {}), [id]: t };
+}
+
+function strokeById(id) {
+  return strokes.find((s) => s.id === id);
+}
+
+// Les éléments de DÉCOR de la sélection (les traits du personnage, eux, suivent ses os)
+function selectedDecorIds() {
+  return strokes.filter((s) => s.kind === 'decor' && selectedStrokes.has(s.id)).map((s) => s.id);
+}
+
+const DECOR_PAD = 8; // marge entre les traits et le cadre de sélection
+
+// Le rectangle autour des éléments de décor sélectionnés, sur l'image en cours
+function decorSelectionBox() {
+  const ids = selectedDecorIds();
+  if (ids.length === 0) return null;
+  const pts = ids.flatMap((id) => strokeWorld(strokeById(id), frame()));
+  const PAD = DECOR_PAD;
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  const x = Math.min(...xs) - PAD;
+  const y = Math.min(...ys) - PAD;
+  return { x, y, w: Math.max(...xs) + PAD - x, h: Math.max(...ys) + PAD - y };
+}
+
+// Poignées : ● tourner (au-dessus), ■ agrandir (coin), largeur (côtés gauche / droit), hauteur (bas)
+function decorHandlePositions(b) {
+  return {
+    rotate: { x: b.x + b.w / 2, y: b.y - 28 },
+    scale: { x: b.x + b.w, y: b.y + b.h },
+    width: { x: b.x + b.w, y: b.y + b.h / 2 },   // tire à droite, le côté gauche reste fixe
+    widthL: { x: b.x, y: b.y + b.h / 2 },        // tire à gauche, le côté droit reste fixe
+    height: { x: b.x + b.w / 2, y: b.y + b.h },  // tire en bas, le haut reste fixe
+  };
+}
+
+function decorHandleAt(p) {
+  const box = decorSelectionBox();
+  if (!box) return null;
+  const hs = decorHandlePositions(box);
+  const grab = HANDLE_SIZE + 6;
+  // le coin d'abord : sur un petit élément, il est tout près des autres poignées
+  for (const name of ['scale', 'rotate', 'width', 'widthL', 'height']) {
+    if (Math.hypot(p.x - hs[name].x, p.y - hs[name].y) <= grab) return name;
+  }
+  return null;
+}
+
+// Début d'un geste sur les éléments sélectionnés : on mémorise leur état de départ
+// (comme pour le bonhomme : on recalcule toujours depuis cet état, pas d'erreurs cumulées)
+function startDecorGesture(kind, p) {
+  const box = decorSelectionBox();
+  const orig = {};
+  for (const id of selectedDecorIds()) orig[id] = { ...tfOf(frame(), id) };
+  dragged = {
+    kind: 'decor',
+    gesture: kind, // 'move', 'rotate', 'scale', 'width', 'widthL' ou 'height'
+    start: p,
+    box,
+    center: { x: box.x + box.w / 2, y: box.y + box.h / 2 },
+    orig,
+  };
+}
+
+function applyDecorGesture(d, p, shiftKey) {
+  const { start, center: c, box } = d;
+  let message = '';
+  for (const id in d.orig) {
+    const s = strokeById(id);
+    const o = d.orig[id];
+    const P = { x: s.pivot.x + o.x, y: s.pivot.y + o.y }; // position actuelle du centre de ce trait
+    const t = { ...o };
+    let P2 = P;
+
+    if (d.gesture === 'move') {
+      P2 = { x: P.x + p.x - start.x, y: P.y + p.y - start.y };
+    } else if (d.gesture === 'rotate') {
+      let a = Math.atan2(p.y - c.y, p.x - c.x) - Math.atan2(start.y - c.y, start.x - c.x);
+      if (shiftKey) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12); // Maj : par pas de 15°
+      // Chaque trait tourne sur lui-même ET son centre tourne autour du centre de la sélection
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      P2 = { x: c.x + (P.x - c.x) * cos - (P.y - c.y) * sin, y: c.y + (P.x - c.x) * sin + (P.y - c.y) * cos };
+      t.angle = o.angle + (a * 180) / Math.PI;
+      message = `Rotation ${Math.round(((((a * 180) / Math.PI) + 540) % 360) - 180)}°`;
+    } else if (d.gesture === 'scale') {
+      const d0 = Math.hypot(start.x - c.x, start.y - c.y) || 1;
+      const k = Math.max(0.05, Math.min(20, Math.hypot(p.x - c.x, p.y - c.y) / d0));
+      P2 = { x: c.x + (P.x - c.x) * k, y: c.y + (P.y - c.y) * k };
+      t.sx = o.sx * k;
+      t.sy = o.sy * k;
+      message = `Taille ×${k.toFixed(2)}`;
+    } else if (d.gesture === 'width' || d.gesture === 'widthL') {
+      // Le côté opposé reste fixe : c'est « l'axe de la porte »
+      // (on enlève la marge du cadre : c'est le VRAI bord de l'élément qui doit rester fixe)
+      const ax = d.gesture === 'width' ? box.x + DECOR_PAD : box.x + box.w - DECOR_PAD;
+      const k = Math.max(0.02, (p.x - ax) / (start.x - ax || 1));
+      P2 = { x: ax + (P.x - ax) * k, y: P.y };
+      t.sx = o.sx * k;
+      message = `Largeur ×${k.toFixed(2)}`;
+    } else if (d.gesture === 'height') {
+      const ay = box.y + DECOR_PAD;
+      const k = Math.max(0.02, (p.y - ay) / (start.y - ay || 1));
+      P2 = { x: P.x, y: ay + (P.y - ay) * k };
+      t.sy = o.sy * k;
+      message = `Hauteur ×${k.toFixed(2)}`;
+    }
+
+    t.x = P2.x - s.pivot.x;
+    t.y = P2.y - s.pivot.y;
+    setTf(frame(), id, t);
+  }
+  if (message) setStatus(message, true);
+}
+
+// Centre du rectangle qui entoure des points
+function centerOf(pts) {
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
 }
 
 // Distance d'un point p au segment [a, b]
@@ -235,14 +401,30 @@ function drawSelection(id) {
 // Dessine une image complète, de l'arrière vers l'avant :
 // décor → bonhomme → traits du personnage → textes → points rouges
 function drawFrame(c, f, { showJoints = false, ghost = null, minAlpha = 0 } = {}) {
-  // Le décor ne bouge pas : inutile de le redessiner en pelure d'oignon
-  if (!ghost) {
-    for (const s of strokes) if (s.kind === 'decor') drawStroke(c, s.points, s.color, s.width);
+  const editing = minAlpha > 0; // l'image en cours d'édition (pas une miniature, ni la lecture)
+
+  // Un trait caché sur cette image : rien en lecture, un fantôme très pâle en édition
+  // (pour qu'on puisse le retrouver avec l'outil 👁 Apparition)
+  const paint = (s, pts, color, width) => {
+    if (strokeVisible(f, s)) {
+      drawStroke(c, pts, color, width);
+    } else if (editing) {
+      c.save();
+      c.globalAlpha = 0.15;
+      drawStroke(c, pts, color, width);
+      c.restore();
+    }
+  };
+
+  // Le décor (en pelure d'oignon aussi : on voit où était la porte sur l'image d'avant ;
+  // les parties qui n'ont pas bougé sont recouvertes par l'image actuelle)
+  for (const s of strokes) {
+    if (s.kind === 'decor') paint(s, strokeWorld(s, f), ghost || s.color, strokeWidthIn(s, f));
   }
   const scale = figScale(f);
   drawFigure(c, f.joints, ghost || '#222', scale);
   for (const s of strokes) {
-    if (s.kind === 'body') drawStroke(c, strokeWorld(s, f.joints, scale), ghost || s.color, s.width * scale);
+    if (s.kind === 'body') paint(s, strokeWorld(s, f), ghost || s.color, strokeWidthIn(s, f));
   }
   for (const id in textDefs) drawText(c, id, f.texts[id], ghost, minAlpha);
   if (showJoints) drawJointDots(c, f.joints);
@@ -274,6 +456,7 @@ function draw() {
   drawFrame(ctx, frame(), { showJoints: tool === 'move', minAlpha: 0.15 });
   if (selectedText) drawSelection(selectedText);
   if (figureSelected && tool === 'move') drawFigureSelection();
+  if (tool === 'move') drawStrokeSelection();
 
   // Le trait en train d'être dessiné
   if (drawing) drawStroke(ctx, drawing, strokeColor.value, Number(strokeWidth.value));
@@ -360,7 +543,8 @@ function updateToolbar() {
   // Pas d'édition de texte ni de dessin pendant la lecture
   addTextBtn.disabled = playing;
   toolButtons.forEach((b) => { b.disabled = playing; });
-  undoStrokeBtn.disabled = playing || strokes.length === 0;
+  undoStrokeBtn.disabled = playing || strokeHistory.length === 0;
+  delStrokeBtn.disabled = playing || selectedStrokes.size === 0;
   textProps.querySelectorAll('input, button').forEach((el) => { el.disabled = playing; });
 }
 
@@ -496,7 +680,26 @@ function lerp(a, b, t) {
 // Interpolation : l'image « entre » a et b. t = 0 → a, t = 1 → b, t = 0.5 → pile au milieu.
 // On interpole TOUT ce qui est un nombre : articulations ET réglages des textes.
 function lerpFrame(a, b, t) {
-  const out = { joints: {}, texts: {}, scale: lerp(figScale(a), figScale(b), t) };
+  const out = {
+    joints: {},
+    texts: {},
+    scale: lerp(figScale(a), figScale(b), t),
+    hiddenStrokes: a.hiddenStrokes || [], // un élément apparaît / disparaît d'un coup, sur l'image clé
+    strokeTf: {},
+  };
+  // Les éléments de décor animés glissent d'une image clé à l'autre, comme le bonhomme
+  const tfIds = new Set([...Object.keys(a.strokeTf || {}), ...Object.keys(b.strokeTf || {})]);
+  for (const id of tfIds) {
+    const ta = tfOf(a, id);
+    const tb = tfOf(b, id);
+    out.strokeTf[id] = {
+      x: lerp(ta.x, tb.x, t),
+      y: lerp(ta.y, tb.y, t),
+      angle: lerp(ta.angle, tb.angle, t),
+      sx: lerp(ta.sx, tb.sx, t),
+      sy: lerp(ta.sy, tb.sy, t),
+    };
+  }
   for (const name in a.joints) {
     out.joints[name] = {
       x: lerp(a.joints[name].x, b.joints[name].x, t),
@@ -637,13 +840,18 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'p' || e.key === 'P') setTool('body');
   else if (e.key === 'd' || e.key === 'D') setTool('decor');
   else if (e.key === 'e' || e.key === 'E') setTool('erase');
+  else if (e.key === 'h' || e.key === 'H') setTool('show');
   else if (e.key === 'ArrowLeft') goTo(current - 1);
   else if (e.key === 'ArrowRight') goTo(current + 1);
   else if (e.key === 'n' || e.key === 'N') addFrame();
   else if (e.key === 'o' || e.key === 'O') { onion.checked = !onion.checked; draw(); }
   else if (e.key === 't' || e.key === 'T') addText();
-  else if (e.key === 'Escape') { selectText(null); figureSelected = false; draw(); }
-  else if (e.key === 'Delete' || e.key === 'Backspace') deleteFrame();
+  else if (e.key === 'Escape') { selectText(null); figureSelected = false; clearStrokeSelection(); draw(); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') {
+    // Des éléments sélectionnés ? On les supprime. Sinon, Suppr supprime l'image (comme avant).
+    if (selectedStrokes.size > 0) deleteSelectedStrokes();
+    else deleteFrame();
+  }
 });
 
 // ===== Étape 2 : tirer à la souris (articulations et textes) =====
@@ -689,6 +897,13 @@ canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     return;
   }
+  // Apparition : pareil, mais on montre / cache au lieu d'effacer
+  if (tool === 'show') {
+    toggled = new Set();
+    toggleAt(p);
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
 
   // Bonhomme entier sélectionné : d'abord les poignées (agrandir / tourner)…
   const handle = figureSelected ? handleAt(p) : null;
@@ -716,19 +931,48 @@ canvas.addEventListener('pointerdown', (e) => {
     draw();
   }
 
+  // Poignées des éléments de décor sélectionnés (tourner, agrandir, étirer)
+  const dh = decorHandleAt(p);
+  if (dh) {
+    startDecorGesture(dh, p);
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
+
   // Les articulations sont prioritaires (elles sont petites, dur de les attraper sinon)
   const joint = jointAt(p);
   if (joint) {
     dragged = { kind: 'joint', name: joint };
+    clearStrokeSelection();
   } else {
     const id = textAt(p);
+    const k = id ? -1 : strokeAt(p);
     if (id) {
       const st = frame().texts[id];
       // On retient le décalage pour que le texte ne « saute » pas sous la souris
       dragged = { kind: 'text', id, dx: st.x - p.x, dy: st.y - p.y };
       selectText(id);
+      clearStrokeSelection();
+    } else if (k >= 0) {
+      // Clic sur un trait : on le sélectionne (Maj = on l'ajoute / l'enlève de la sélection)
+      selectText(null);
+      const sid = strokes[k].id;
+      if (e.shiftKey) {
+        selectedStrokes.has(sid) ? selectedStrokes.delete(sid) : selectedStrokes.add(sid);
+      } else if (!selectedStrokes.has(sid)) {
+        selectedStrokes = new Set([sid]); // (s'il est déjà sélectionné, on garde tout le groupe)
+      }
+      showStrokeSelection();
+      // … et on peut directement le tirer pour le déplacer
+      if (!e.shiftKey && selectedDecorIds().length) startDecorGesture('move', p);
+    } else if (decorSelectionBox() && insideBox(p, decorSelectionBox())) {
+      // Clic dans le cadre des éléments sélectionnés : on les déplace (plus facile que viser un trait fin)
+      startDecorGesture('move', p);
     } else {
-      selectText(null); // clic dans le vide : on désélectionne
+      // Clic dans le vide : on désélectionne, et on commence un cadre de sélection
+      selectText(null);
+      if (!e.shiftKey) clearStrokeSelection();
+      dragged = { kind: 'marquee', start: p, end: p, additive: e.shiftKey };
     }
     draw();
   }
@@ -751,6 +995,11 @@ canvas.addEventListener('pointermove', (e) => {
   if (tool === 'erase') {
     if (erasing) eraseAt(p);
     canvas.style.cursor = strokeAt(p) >= 0 ? 'pointer' : 'cell';
+    return;
+  }
+  if (tool === 'show') {
+    if (toggled) toggleAt(p);
+    canvas.style.cursor = strokeAt(p) >= 0 ? 'pointer' : 'default';
     return;
   }
   if (tool !== 'move') {
@@ -796,6 +1045,12 @@ canvas.addEventListener('pointermove', (e) => {
       let deg = Math.round((angle * 180) / Math.PI);
       deg = ((deg + 540) % 360) - 180; // ramené entre -180° et 180°
       setStatus(`Rotation ${deg}°`, true);
+    } else if (dragged.kind === 'decor') {
+      applyDecorGesture(dragged, p, e.shiftKey);
+    } else if (dragged.kind === 'marquee') {
+      dragged.end = p; // le cadre suit la souris (on sélectionne au relâchement)
+      draw();
+      return;
     } else if (dragged.kind === 'joint') {
       pose()[dragged.name].x = p.x;
       pose()[dragged.name].y = p.y;
@@ -816,6 +1071,21 @@ canvas.addEventListener('pointermove', (e) => {
   }
   if (!dragged && figureSelected && insideBox(p, figureBox(pose()))) {
     canvas.style.cursor = 'move';
+    return;
+  }
+  if (dragged && dragged.kind === 'decor') return; // garder le curseur du geste
+  const dhv = !dragged ? decorHandleAt(p) : null;
+  if (dhv) {
+    canvas.style.cursor = { rotate: 'grab', scale: 'nwse-resize', width: 'ew-resize', widthL: 'ew-resize', height: 'ns-resize' }[dhv];
+    return;
+  }
+  const dbox = !dragged ? decorSelectionBox() : null;
+  if (dbox && insideBox(p, dbox) && !jointAt(p) && !textAt(p)) {
+    canvas.style.cursor = 'move';
+    return;
+  }
+  if (!dragged && !jointAt(p) && !textAt(p) && strokeAt(p) >= 0) {
+    canvas.style.cursor = 'pointer'; // un trait qu'on peut sélectionner
     return;
   }
   const hover = jointAt(p) || textAt(p);
@@ -909,16 +1179,23 @@ canvas.addEventListener('dblclick', (e) => {
 canvas.addEventListener('pointerup', () => {
   if (drawing) finishStroke();
   // Fin d'un geste agrandir / tourner : le message (taille, angle) s'efface tout seul
-  if (dragged && (dragged.kind === 'scale' || dragged.kind === 'rotate')) {
+  if (dragged && (dragged.kind === 'scale' || dragged.kind === 'rotate' || dragged.kind === 'decor')) {
     setStatus(statusEl.textContent);
+  }
+  if (dragged && dragged.kind === 'marquee') {
+    const m = dragged;
+    dragged = null; // d'abord, sinon le cadre serait redessiné une dernière fois et resterait affiché
+    finishMarquee(m);
   }
   dragged = null;
   erasing = false;
+  toggled = null;
 });
 canvas.addEventListener('pointercancel', () => {
   drawing = null;
   dragged = null;
   erasing = false;
+  toggled = null;
   draw();
 });
 
@@ -932,15 +1209,19 @@ let erasing = false;
 
 const toolHints = {
   move: '',
-  body: '✏️ Le trait s’accroche au membre le plus proche',
-  decor: '🖌 Le décor est le même sur toutes les images',
-  erase: '🧽 Passe sur un trait pour l’effacer',
+  body: '✏️ Le trait suit le membre le plus proche, à partir de cette image',
+  decor: '🖌 Le décor apparaît à partir de cette image',
+  erase: '🧽 Passe sur un trait pour l’effacer de toutes les images',
+  show: '👁 Passe sur un élément pour le cacher / le montrer à partir de cette image',
 };
 
 function setTool(name) {
   tool = name;
   toolButtons.forEach((b) => b.classList.toggle('active', b.dataset.tool === name));
-  if (name !== 'move') selectText(null);
+  if (name !== 'move') {
+    selectText(null);
+    clearStrokeSelection();
+  }
   canvas.style.cursor = name === 'move' ? 'default' : 'crosshair';
   if (toolHints[name]) setStatus(toolHints[name]);
   draw(); // les points rouges ne s'affichent qu'avec l'outil « Bouger »
@@ -954,7 +1235,7 @@ const round1 = (v) => Math.round(v * 10) / 10;
 function finishStroke() {
   const pts = drawing;
   drawing = null;
-  const s = { kind: tool, color: strokeColor.value, width: Number(strokeWidth.value) };
+  const s = { id: 's' + nextStrokeId++, kind: tool, color: strokeColor.value, width: Number(strokeWidth.value) };
 
   if (tool === 'body') {
     // On accroche le trait à l'os le plus proche de son centre
@@ -977,8 +1258,46 @@ function finishStroke() {
     s.points = pts;
   }
   s.points = s.points.map((p) => ({ x: round1(p.x), y: round1(p.y) }));
+  // Décor : le centre du trait, autour duquel il tournera / s'étirera quand on l'anime
+  if (s.kind === 'decor') s.pivot = centerOf(s.points);
 
   strokes.push(s);
+  strokeHistory.push({ type: 'add', id: s.id });
+  // Le trait apparaît À PARTIR de cette image : on le cache sur les images d'avant
+  frames.forEach((f, i) => {
+    if (i < current) f.hiddenStrokes = [...(f.hiddenStrokes || []), s.id];
+  });
+  afterStrokesChange();
+}
+
+// Retire complètement un trait (de la liste et des images où il était caché)
+function removeStroke(k) {
+  const [s] = strokes.splice(k, 1);
+  for (const f of frames) {
+    if (f.hiddenStrokes) f.hiddenStrokes = f.hiddenStrokes.filter((id) => id !== s.id);
+  }
+}
+
+// --- Outil 👁 Apparition ---
+let toggled = null; // traits déjà basculés pendant le geste en cours (chacun une seule fois)
+
+// Montre ou cache le trait sous p, sur cette image ET les suivantes qui étaient pareilles
+// (même règle que pour les textes)
+function toggleAt(p) {
+  const k = strokeAt(p);
+  if (k < 0) return;
+  const s = strokes[k];
+  if (toggled.has(s.id)) return;
+  toggled.add(s.id);
+
+  const wasVisible = strokeVisible(frame(), s);
+  for (let i = current; i < frames.length; i++) {
+    const f = frames[i];
+    if (i > current && strokeVisible(f, s) !== wasVisible) break; // première image différente : stop
+    const hidden = (f.hiddenStrokes || []).filter((id) => id !== s.id);
+    if (wasVisible) hidden.push(s.id); // il était visible → on le cache
+    f.hiddenStrokes = hidden;
+  }
   afterStrokesChange();
 }
 
@@ -986,9 +1305,8 @@ function finishStroke() {
 function strokeAt(p) {
   for (let k = strokes.length - 1; k >= 0; k--) {
     const s = strokes[k];
-    const k = s.kind === 'body' ? figScale(frame()) : 1;
-    const pts = strokeWorld(s, pose(), k);
-    const tolerance = (s.width * k) / 2 + 6;
+    const pts = strokeWorld(s, frame());
+    const tolerance = strokeWidthIn(s, frame()) / 2 + 6;
     if (pts.length === 1 && Math.hypot(p.x - pts[0].x, p.y - pts[0].y) <= tolerance) return k;
     for (let i = 1; i < pts.length; i++) {
       if (distToSegment(p, pts[i - 1], pts[i]) <= tolerance) return k;
@@ -1000,18 +1318,192 @@ function strokeAt(p) {
 function eraseAt(p) {
   const k = strokeAt(p);
   if (k >= 0) {
-    strokes.splice(k, 1);
+    deleteStrokes([strokes[k].id]);
     afterStrokesChange();
   }
 }
 
+// --- Historique des traits, pour Cmd+Z ---
+// Chaque action est rangée ici : { type: 'add', id } quand on dessine un trait,
+// { type: 'delete', items } quand on en supprime (gomme ou sélection).
+// Annuler = défaire la dernière action.
+let strokeHistory = [];
+
+// Supprime des traits en gardant de quoi les remettre (position dans la liste + images où ils étaient cachés)
+// record = false : l'appelant range lui-même l'action dans l'historique (renvoyée par la fonction)
+function deleteStrokes(ids, record = true) {
+  const items = [];
+  for (const id of ids) {
+    const index = strokes.findIndex((s) => s.id === id);
+    if (index < 0) continue;
+    const hiddenIn = frames.filter((f) => (f.hiddenStrokes || []).includes(id));
+    items.push({ stroke: strokes[index], index, hiddenIn });
+  }
+  // On retire en partant de la fin, pour ne pas décaler les positions des suivants
+  for (const it of [...items].sort((a, b) => b.index - a.index)) removeStroke(it.index);
+  const action = { type: 'delete', items };
+  if (record && items.length) strokeHistory.push(action);
+  ids.forEach((id) => selectedStrokes.delete(id));
+  return action;
+}
+
+// Cache des traits sur l'image en cours ET toutes les suivantes (ils restent sur les images d'avant).
+// On note les images modifiées, pour pouvoir annuler.
+function hideFromHere(ids) {
+  const items = ids.map((id) => {
+    const changed = [];
+    for (let i = current; i < frames.length; i++) {
+      const f = frames[i];
+      if (!(f.hiddenStrokes || []).includes(id)) {
+        f.hiddenStrokes = [...(f.hiddenStrokes || []), id];
+        changed.push(f);
+      }
+    }
+    return { id, changed };
+  });
+  return { type: 'hide', items };
+}
+
+// Défait une action de l'historique
+function undoAction(action) {
+  if (action.type === 'add') {
+    // Défaire un dessin : on retire ce trait
+    const index = strokes.findIndex((s) => s.id === action.id);
+    if (index >= 0) removeStroke(index);
+  } else if (action.type === 'delete') {
+    // Défaire une suppression complète : on remet chaque trait à sa place, dans l'ordre
+    for (const it of [...action.items].sort((a, b) => a.index - b.index)) {
+      strokes.splice(Math.min(it.index, strokes.length), 0, it.stroke);
+      for (const f of it.hiddenIn) {
+        if (frames.includes(f)) f.hiddenStrokes = [...(f.hiddenStrokes || []), it.stroke.id];
+      }
+    }
+  } else if (action.type === 'hide') {
+    // Défaire « supprimer à partir d'ici » : on le rend de nouveau visible là où on l'avait caché
+    for (const it of action.items) {
+      for (const f of it.changed) {
+        f.hiddenStrokes = (f.hiddenStrokes || []).filter((id) => id !== it.id);
+      }
+    }
+  } else if (action.type === 'group') {
+    // Plusieurs actions faites d'un seul geste : on les défait toutes, de la dernière à la première
+    [...action.actions].reverse().forEach(undoAction);
+  }
+}
+
 function undoStroke() {
-  if (strokes.length === 0) return;
-  strokes.pop();
+  const action = strokeHistory.pop();
+  if (!action) return;
+  undoAction(action);
+  if (action.type !== 'add') setStatus('↶ Suppression annulée');
   afterStrokesChange();
 }
 
 undoStrokeBtn.addEventListener('click', undoStroke);
+
+// --- Sélection d'éléments (outil ✋ Bouger) ---
+let selectedStrokes = new Set(); // identifiants des traits sélectionnés
+const delStrokeBtn = document.getElementById('delStrokeBtn');
+
+function clearStrokeSelection() {
+  if (selectedStrokes.size === 0) return;
+  selectedStrokes = new Set();
+  if (statusEl.textContent.includes('sélectionné')) setStatus(''); // effacer le message devenu faux
+  updateToolbar();
+}
+
+function showStrokeSelection() {
+  const n = selectedStrokes.size;
+  if (n > 0) setStatus(`${n} élément(s) sélectionné(s) : Suppr pour supprimer, Maj+clic pour ajouter`);
+  updateToolbar();
+}
+
+// Les traits sélectionnés sont surlignés en bleu
+function drawStrokeSelection() {
+  for (const s of strokes) {
+    if (!selectedStrokes.has(s.id)) continue;
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    drawStroke(ctx, strokeWorld(s, frame()), '#2a6fdb', strokeWidthIn(s, frame()) + 10);
+    ctx.restore();
+  }
+  // Cadre + poignées autour des éléments de décor sélectionnés (pour les animer)
+  const box = decorSelectionBox();
+  if (box && !(dragged && dragged.kind === 'marquee')) {
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#2a6fdb';
+    ctx.strokeRect(box.x, box.y, box.w, box.h);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'white';
+    const hs = decorHandlePositions(box);
+    ctx.beginPath();
+    ctx.moveTo(hs.rotate.x, box.y);
+    ctx.lineTo(hs.rotate.x, hs.rotate.y + HANDLE_SIZE / 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(hs.rotate.x, hs.rotate.y, HANDLE_SIZE / 2 + 1, 0, Math.PI * 2); // ● tourner
+    ctx.fill();
+    ctx.stroke();
+    for (const h of [hs.scale, hs.width, hs.height]) {                      // ■ agrandir, largeur, hauteur
+      ctx.fillRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+      ctx.strokeRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+    }
+    ctx.restore();
+  }
+  // Le cadre de sélection en cours
+  if (dragged && dragged.kind === 'marquee') {
+    const { start: a, end: b } = dragged;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#2a6fdb';
+    ctx.fillStyle = 'rgba(42, 111, 219, 0.08)';
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+    ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+    ctx.restore();
+  }
+}
+
+// Au relâchement : on sélectionne les traits ENTIÈREMENT dans le cadre
+function finishMarquee({ start: a, end: b, additive }) {
+  const box = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+  if (box.w < 4 && box.h < 4) { draw(); return; } // simple clic dans le vide, pas un cadre
+  if (!additive) selectedStrokes = new Set();
+  for (const s of strokes) {
+    if (strokeWorld(s, frame()).every((p) => insideBox(p, box))) selectedStrokes.add(s.id);
+  }
+  showStrokeSelection();
+  draw();
+}
+
+// Suppr sur une sélection : l'élément disparaît À PARTIR de cette image (et sur toutes les suivantes).
+// S'il n'est visible sur aucune image d'avant, il ne servirait plus à rien : on le supprime vraiment.
+function deleteSelectedStrokes() {
+  const ids = [...selectedStrokes];
+  if (ids.length === 0) return;
+
+  const visibleBefore = (id) => {
+    const s = strokes.find((st) => st.id === id);
+    return frames.slice(0, current).some((f) => strokeVisible(f, s));
+  };
+  const toHide = ids.filter(visibleBefore);
+  const toDelete = ids.filter((id) => !visibleBefore(id));
+
+  const actions = [];
+  if (toHide.length) actions.push(hideFromHere(toHide));
+  if (toDelete.length) actions.push(deleteStrokes(toDelete, false));
+  strokeHistory.push(actions.length === 1 ? actions[0] : { type: 'group', actions });
+  selectedStrokes = new Set();
+
+  setStatus(current === 0
+    ? `🗑 ${ids.length} élément(s) supprimé(s) (Cmd+Z pour annuler)`
+    : `🗑 ${ids.length} élément(s) supprimé(s) à partir de l'image ${current + 1} (Cmd+Z pour annuler)`);
+  afterStrokesChange();
+}
+
+delStrokeBtn.addEventListener('click', deleteSelectedStrokes);
 
 // Un trait apparaît sur toutes les images → on redessine tout, miniatures comprises
 function afterStrokesChange() {
@@ -1056,6 +1548,14 @@ function loadProject(data) {
   if (!data || !Array.isArray(data.frames) || data.frames.length === 0) {
     throw new Error('fichier invalide');
   }
+  // Animations enregistrées avec la version « plusieurs personnages » (essai retiré) :
+  // on garde le 1er personnage, pour ne rien perdre
+  for (const f of data.frames) {
+    if (!f.joints && Array.isArray(f.figs) && f.figs[0]) {
+      f.joints = f.figs[0].joints;
+      f.scale = f.figs[0].scale;
+    }
+  }
   for (const f of data.frames) {
     for (const name in startPose) {
       if (!f.joints || !f.joints[name]) throw new Error('pose incomplète');
@@ -1075,7 +1575,13 @@ function loadProject(data) {
       st.visible ??= true;
       texts[id] = st;
     }
-    frames.push({ joints: f.joints, texts, scale: f.scale ?? 1 });
+    frames.push({
+      joints: f.joints,
+      texts,
+      scale: f.scale ?? 1,
+      hiddenStrokes: Array.isArray(f.hiddenStrokes) ? f.hiddenStrokes : [],
+      strokeTf: f.strokeTf && typeof f.strokeTf === 'object' ? f.strokeTf : {},
+    });
   }
   for (const id in textDefs) delete textDefs[id];
   Object.assign(textDefs, defs);
@@ -1086,6 +1592,18 @@ function loadProject(data) {
     Array.isArray(s.points) && s.points.length > 0 &&
     (s.kind === 'decor' || (s.kind === 'body' && Array.isArray(s.bone) &&
       s.bone.every((name) => name in startPose))));
+  // Les traits des anciens fichiers n'ont pas d'identifiant : on leur en donne un
+  let maxId = 0;
+  for (const s of strokes) {
+    const n = Number(String(s.id || '').slice(1));
+    if (n > maxId) maxId = n;
+  }
+  for (const s of strokes) if (!s.id) s.id = 's' + ++maxId;
+  // Anciens fichiers : les traits de décor n'avaient pas de pivot (centre de rotation)
+  for (const s of strokes) if (s.kind === 'decor' && !s.pivot) s.pivot = centerOf(s.points);
+  nextStrokeId = maxId + 1;
+  strokeHistory = [];                 // l'historique ne concerne que l'animation qu'on vient de quitter
+  selectedStrokes = new Set();
 
   if (data.settings) {
     speed.value = data.settings.speed ?? speed.value;

@@ -51,10 +51,12 @@
     <button class="tool active" data-tool="move" title="Bouger les articulations et les textes (V)">✋ Bouger</button>
     <button class="tool" data-tool="body" title="Dessiner sur le personnage : le trait suit le membre le plus proche (P)">✏️ Personnage</button>
     <button class="tool" data-tool="decor" title="Dessiner le décor : le même sur toutes les images (D)">🖌 Décor</button>
-    <button class="tool" data-tool="erase" title="Passer sur un trait pour l'effacer (E)">🧽 Gomme</button>
+    <button class="tool" data-tool="erase" title="Passer sur un trait pour l'effacer de toutes les images (E)">🧽 Gomme</button>
+    <button class="tool" data-tool="show" title="Passer sur un élément pour le cacher / le montrer à partir de cette image (H)">👁 Apparition</button>
     <input id="strokeColor" type="color" value="#222222" title="Couleur du trait">
     <label>Épaisseur <input id="strokeWidth" type="range" min="1" max="30" value="4"></label>
-    <button id="undoStrokeBtn" title="Annuler le dernier trait (Cmd+Z)">↶ Annuler</button>
+    <button id="undoStrokeBtn" title="Annuler le dernier trait, coup de gomme ou suppression (Cmd+Z)">↶ Annuler</button>
+    <button id="delStrokeBtn" title="Supprimer les éléments sélectionnés à partir de cette image (Suppr)">🗑 Élément</button>
   </div>
 
   <canvas id="scene" width="800" height="500"></canvas>
