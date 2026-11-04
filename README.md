@@ -100,3 +100,11 @@ Pas sûr·e de toi ? Ouvre d'abord une **issue** pour en discuter, avec plaisir.
 - **Du code lisible et commenté** (en français de préférence), pensé aussi pour les gens qui apprennent.
 - **Ne pas casser les animations existantes** : un ancien fichier `.batons.json` doit toujours s'ouvrir.
 - Une pull request = un sujet. Plusieurs petites valent mieux qu'une énorme.
+
+En proposant une pull request, tu acceptes que ta contribution soit publiée sous la même licence que le projet.
+
+---
+
+## Licence
+
+[MIT](LICENSE) : tu peux utiliser, copier, modifier et redistribuer ce code librement, y compris dans tes propres projets, à condition de garder la mention de licence et le nom de l'autrice.
