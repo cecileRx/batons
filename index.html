@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Bâtons</title>
+  <style>
+    body { margin: 0; background: #eee; font-family: system-ui, sans-serif;
+           display: flex; flex-direction: column; align-items: center;
+           justify-content: center; gap: 12px; min-height: 100vh; }
+    canvas#scene { background: white; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+             touch-action: none; /* empêche le scroll pendant le drag sur tablette */ }
+
+    /* Barre de boutons */
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    .toolbar button { font: inherit; padding: 6px 12px; border: 1px solid #bbb;
+                      border-radius: 6px; background: white; cursor: pointer; }
+    .toolbar button:hover { background: #f4f4f4; }
+    .toolbar button:disabled { opacity: .4; cursor: default; }
+    #frameInfo { min-width: 90px; text-align: center; color: #555; }
+    .toolbar label { display: flex; align-items: center; gap: 6px; color: #333; }
+    #speedValue { min-width: 48px; color: #555; }
+    #playBtn { min-width: 100px; font-weight: 600; }
+    #status { color: #2a7a3a; min-width: 220px; }
+    .toolbar button.tool.active { background: #ffe3e8; border-color: crimson; }
+    #strokeWidth { width: 80px; }
+    #textProps { display: flex; gap: 8px; align-items: center; }
+    #textProps[hidden] { display: none; }
+    #textInput { font: inherit; padding: 5px 8px; border: 1px solid #bbb;
+                 border-radius: 6px; width: 160px; }
+    #textSize, #textAngle, #textOpacity { width: 80px; }
+
+    /* Frise des images clés */
+    #timeline { display: flex; gap: 6px; max-width: 800px; overflow-x: auto;
+                padding: 4px; }
+    #timeline canvas { background: white; border: 2px solid transparent;
+                       border-radius: 4px; cursor: pointer; flex: none; }
+    #timeline canvas.active { border-color: crimson; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="newBtn" title="Recommencer une animation vide">🗒 Nouveau</button>
+    <button id="openBtn" title="Ouvrir un fichier .batons.json">📂 Ouvrir</button>
+    <button id="saveBtn" title="Télécharger l'animation en fichier (Cmd+S)">💾 Enregistrer</button>
+    <button id="exportBtn" title="Exporter l'animation en vidéo">🎬 Exporter la vidéo</button>
+    <input id="fileInput" type="file" accept=".json,application/json" hidden>
+    <span id="status"></span>
+  </div>
+
+  <div class="toolbar" id="toolBar">
+    <button class="tool active" data-tool="move" title="Bouger les articulations et les textes (V)">✋ Bouger</button>
+    <button class="tool" data-tool="body" title="Dessiner sur le personnage : le trait suit le membre le plus proche (P)">✏️ Personnage</button>
+    <button class="tool" data-tool="decor" title="Dessiner le décor : le même sur toutes les images (D)">🖌 Décor</button>
+    <button class="tool" data-tool="erase" title="Passer sur un trait pour l'effacer (E)">🧽 Gomme</button>
+    <input id="strokeColor" type="color" value="#222222" title="Couleur du trait">
+    <label>Épaisseur <input id="strokeWidth" type="range" min="1" max="30" value="4"></label>
+    <button id="undoStrokeBtn" title="Annuler le dernier trait (Cmd+Z)">↶ Annuler</button>
+  </div>
+
+  <canvas id="scene" width="800" height="500"></canvas>
+
+  <div class="toolbar">
+    <button id="prevBtn" title="Image précédente (←)">◀</button>
+    <span id="frameInfo"></span>
+    <button id="nextBtn" title="Image suivante (→)">▶</button>
+    <button id="addBtn" title="Dupliquer l'image actuelle (N)">＋ Nouvelle image</button>
+    <button id="delBtn" title="Supprimer l'image actuelle (Suppr)">🗑 Supprimer</button>
+    <label title="Afficher l'image précédente en gris (O)">
+      <input id="onion" type="checkbox" checked> 🧅 Précédente
+    </label>
+    <label title="Afficher l'image suivante en bleu">
+      <input id="onionNext" type="checkbox"> Suivante
+    </label>
+  </div>
+
+  <div class="toolbar" id="textBar">
+    <button id="addTextBtn" title="Ajouter un texte">＋ Texte</button>
+    <span id="textProps" hidden>
+      <label title="Décoche pour cacher le texte sur cette image (et les suivantes identiques)">
+        <input id="textVisible" type="checkbox" checked> Visible</label>
+      <input id="textInput" type="text" placeholder="Ton texte…"
+             title="La réplique de cette image (et des suivantes identiques)">
+      <input id="textColor" type="color" title="Couleur (la même sur toutes les images)">
+      <label title="Propre à chaque image : s'anime">Taille
+        <input id="textSize" type="range" min="10" max="200"></label>
+      <label title="Propre à chaque image : s'anime">Rotation
+        <input id="textAngle" type="range" min="-180" max="180"></label>
+      <label title="Propre à chaque image : s'anime (0 = invisible, pour les fondus)">Opacité
+        <input id="textOpacity" type="range" min="0" max="100"></label>
+      <button id="delTextBtn" title="Supprimer ce texte de toutes les images">🗑 Texte</button>
+    </span>
+  </div>
+
+  <div id="timeline"></div>
+
+  <div class="toolbar">
+    <button id="playBtn" title="Lecture / Stop (Espace)">▶ Lecture</button>
+    <label>Durée entre deux images
+      <input id="speed" type="range" min="150" max="2000" step="50" value="600">
+      <span id="speedValue"></span>
+    </label>
+    <label><input id="loop" type="checkbox" checked> En boucle</label>
+    <label title="Le mouvement ralentit à l'approche de chaque image clé">
+      <input id="smooth" type="checkbox" checked> Adoucir
+    </label>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
