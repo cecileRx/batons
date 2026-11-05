@@ -80,6 +80,54 @@ function strokeVisible(f, s) {
 }
 let tool = 'move';       // outil actif : 'move', 'body', 'decor' ou 'erase'
 let drawing = null;      // points du trait en cours de dessin (ou null)
+let shape = 'free';      // forme : 'free' (main levée), 'line', 'rect', 'circle' ou 'ellipse'
+let shapeStart = null;   // point où l'on a commencé la forme
+
+// ===== Formes automatiques =====
+// Une forme est simplement un trait dont on calcule les points : elle se comporte ensuite
+// exactement comme un trait à main levée (décor ou personnage, gomme, apparition, animation…).
+// Maj : trait droit par pas de 45°, rectangle → carré, ovale → cercle.
+function makeShape(kind, a, b, shiftKey) {
+  if (kind === 'line') {
+    if (shiftKey) {
+      // on « aimante » l'angle sur des multiples de 45°
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const ang = Math.round(Math.atan2(b.y - a.y, b.x - a.x) / (Math.PI / 4)) * (Math.PI / 4);
+      b = { x: a.x + len * Math.cos(ang), y: a.y + len * Math.sin(ang) };
+    }
+    return [a, b];
+  }
+
+  let w = b.x - a.x;
+  let h = b.y - a.y;
+  if (shiftKey && (kind === 'rect' || kind === 'ellipse')) {
+    const side = Math.max(Math.abs(w), Math.abs(h)); // même largeur et hauteur
+    w = Math.sign(w || 1) * side;
+    h = Math.sign(h || 1) * side;
+  }
+
+  if (kind === 'rect') {
+    // les 4 coins, et on revient au premier pour fermer
+    return [a, { x: a.x + w, y: a.y }, { x: a.x + w, y: a.y + h }, { x: a.x, y: a.y + h }, a];
+  }
+
+  // Cercle : depuis le CENTRE (on tire le rayon). Ovale : dans le rectangle tracé.
+  let cx, cy, rx, ry;
+  if (kind === 'circle') {
+    cx = a.x; cy = a.y;
+    rx = ry = Math.hypot(b.x - a.x, b.y - a.y);
+  } else {
+    cx = a.x + w / 2; cy = a.y + h / 2;
+    rx = Math.abs(w) / 2; ry = Math.abs(h) / 2;
+  }
+  const N = 64; // nombre de points du contour : assez pour que ce soit bien rond
+  const pts = [];
+  for (let k = 0; k <= N; k++) {
+    const t = (k / N) * Math.PI * 2;
+    pts.push({ x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) });
+  }
+  return pts;
+}
 
 // Os auxquels un trait peut s'accrocher (+ la tête, qui n'est pas dans la liste des os)
 const attachBones = [...bones, ['cou', 'tete']];
@@ -216,6 +264,29 @@ function startDecorGesture(kind, p) {
   };
 }
 
+// Deux transformations identiques ? (à un centième près)
+function sameTf(a, b) {
+  return ['x', 'y', 'angle', 'sx', 'sy'].every((k) => Math.abs(a[k] - b[k]) < 0.01);
+}
+
+// Fin d'un geste sur des éléments de décor : les images SUIVANTES qui avaient exactement
+// l'ancienne position prennent la nouvelle (même règle que pour les répliques des textes).
+// On s'arrête à la première image différente : une animation déjà faite n'est jamais écrasée.
+function propagateDecorForward(orig) {
+  let changed = false;
+  for (const id in orig) {
+    const before = orig[id];
+    const after = tfOf(frame(), id);
+    if (sameTf(before, after)) continue; // cet élément n'a pas bougé
+    for (let j = current + 1; j < frames.length; j++) {
+      if (!sameTf(tfOf(frames[j], id), before)) break;
+      setTf(frames[j], id, { ...after });
+      changed = true;
+    }
+  }
+  if (changed) refreshAllThumbs();
+}
+
 function applyDecorGesture(d, p, shiftKey) {
   const { start, center: c, box } = d;
   let message = '';
@@ -295,10 +366,21 @@ function nearestBone(p, joints) {
   return best;
 }
 
-function drawStroke(c, pts, color, width) {
+// hardness (dureté) : 1 = bord net ; vers 0 = bord de plus en plus flou, comme un pinceau doux.
+// Le flou est fait avec l'ombre du canvas (shadowBlur), centrée sur le trait.
+function drawStroke(c, pts, color, width, hardness = 1) {
   c.save();
   c.strokeStyle = color;
   c.fillStyle = color;
+  if (hardness < 1) {
+    const soft = 1 - hardness;
+    width = Math.max(1, width * (1 - 0.6 * soft)); // le cœur du trait s'amincit…
+    // … et un halo flou l'entoure. shadowBlur ne suit pas le zoom du canvas : on le
+    // multiplie par l'échelle actuelle pour que les vignettes aient le même rendu
+    const zoom = c.getTransform().a;
+    c.shadowColor = color;
+    c.shadowBlur = width * soft * 1.5 * zoom;
+  }
   c.lineWidth = width;
   c.lineCap = 'round';
   c.lineJoin = 'round';
@@ -406,12 +488,13 @@ function drawFrame(c, f, { showJoints = false, ghost = null, minAlpha = 0 } = {}
   // Un trait caché sur cette image : rien en lecture, un fantôme très pâle en édition
   // (pour qu'on puisse le retrouver avec l'outil 👁 Apparition)
   const paint = (s, pts, color, width) => {
+    const hardness = s.hardness ?? 1; // dureté de la brosse (les anciens traits : nets)
     if (strokeVisible(f, s)) {
-      drawStroke(c, pts, color, width);
+      drawStroke(c, pts, color, width, hardness);
     } else if (editing) {
       c.save();
       c.globalAlpha = 0.15;
-      drawStroke(c, pts, color, width);
+      drawStroke(c, pts, color, width, hardness);
       c.restore();
     }
   };
@@ -459,7 +542,7 @@ function draw() {
   if (tool === 'move') drawStrokeSelection();
 
   // Le trait en train d'être dessiné
-  if (drawing) drawStroke(ctx, drawing, strokeColor.value, Number(strokeWidth.value));
+  if (drawing) drawStroke(ctx, drawing, strokeColor.value, Number(strokeWidth.value), Number(strokeHardness.value) / 100);
 
   // Presque toute modification finit par redessiner : c'est le bon moment pour sauvegarder
   scheduleSave();
@@ -742,6 +825,8 @@ function updateToolbar() {
   toolButtons.forEach((b) => { b.disabled = playing; });
   undoStrokeBtn.disabled = playing || strokeHistory.length === 0;
   delStrokeBtn.disabled = playing || selectedStrokes.size === 0;
+  copyBtn.disabled = playing || selectedStrokes.size === 0;
+  pasteBtn.disabled = playing || !strokeClipboard;
   textProps.querySelectorAll('input, button').forEach((el) => { el.disabled = playing; });
 }
 
@@ -1049,6 +1134,14 @@ document.addEventListener('keydown', (e) => {
     selectFigure();
     return;
   }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+    if (selectedStrokes.size) { e.preventDefault(); copyStrokes(); }
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+    if (strokeClipboard) { e.preventDefault(); pasteStrokes(); }
+    return;
+  }
   if (e.metaKey || e.ctrlKey) return; // ne pas confondre Cmd+D, Cmd+P… avec les raccourcis d'outils
   if (e.key === 'v' || e.key === 'V') setTool('move');
   else if (e.key === 'p' || e.key === 'P') setTool('body');
@@ -1097,9 +1190,10 @@ canvas.addEventListener('pointerdown', (e) => {
   if (playing) return; // pas d'édition pendant la lecture
   const p = mousePos(e);
 
-  // Outils de dessin : on commence un trait
+  // Outils de dessin : on commence un trait (à main levée) ou une forme (on retient son point de départ)
   if (tool === 'body' || tool === 'decor') {
     drawing = [p];
+    shapeStart = p;
     canvas.setPointerCapture(e.pointerId);
     draw();
     return;
@@ -1197,6 +1291,12 @@ canvas.addEventListener('pointermove', (e) => {
   if (playing) return;
   const p = mousePos(e);
 
+  if (drawing && shape !== 'free') {
+    // Forme automatique : on la recalcule entièrement à chaque mouvement de souris
+    drawing = makeShape(shape, shapeStart, p, e.shiftKey);
+    draw();
+    return;
+  }
   if (drawing) {
     // On n'ajoute un point que si la souris a vraiment bougé (fichier plus léger)
     const last = drawing[drawing.length - 1];
@@ -1393,6 +1493,7 @@ canvas.addEventListener('dblclick', (e) => {
 canvas.addEventListener('pointerup', () => {
   if (drawing) finishStroke();
   // Fin d'un geste agrandir / tourner : le message (taille, angle) s'efface tout seul
+  if (dragged && dragged.kind === 'decor') propagateDecorForward(dragged.orig);
   if (dragged && (dragged.kind === 'scale' || dragged.kind === 'rotate' || dragged.kind === 'decor')) {
     setStatus(statusEl.textContent);
   }
@@ -1417,7 +1518,10 @@ canvas.addEventListener('pointercancel', () => {
 
 const toolButtons = document.querySelectorAll('#toolBar .tool');
 const strokeColor = document.getElementById('strokeColor');
-const strokeWidth = document.getElementById('strokeWidth');
+const strokeWidth = document.getElementById('strokeWidth');         // diamètre de la brosse
+const strokeHardness = document.getElementById('strokeHardness');   // dureté (100 % = bord net)
+const shapeButtons = document.querySelectorAll('#drawBar .shape');
+const brushPreview = document.getElementById('brushPreview');
 const undoStrokeBtn = document.getElementById('undoStrokeBtn');
 let erasing = false;
 
@@ -1443,13 +1547,54 @@ function setTool(name) {
 
 toolButtons.forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
 
+// --- Barre de dessin : forme, diamètre, dureté ---
+function setShape(name) {
+  shape = name;
+  shapeButtons.forEach((b) => b.classList.toggle('active', b.dataset.shape === name));
+  // Choisir une forme sans être en train de dessiner : on passe en 🖌 Décor (le cas le plus courant)
+  if (tool !== 'body' && tool !== 'decor') setTool('decor');
+  const hints = {
+    free: '✍️ Main levée',
+    line: '╱ Trait droit : tire d’un bout à l’autre (Maj : par pas de 45°)',
+    rect: '▭ Rectangle : tire d’un coin à l’autre (Maj : carré)',
+    circle: '◯ Cercle : clique au centre et tire le rayon',
+    ellipse: '⬭ Ovale : tire d’un coin à l’autre (Maj : cercle)',
+  };
+  setStatus(hints[name]);
+}
+shapeButtons.forEach((b) => b.addEventListener('click', () => setShape(b.dataset.shape)));
+
+// Aperçu de la brosse : un rond à la taille et à la dureté choisies
+function updateBrushPreview() {
+  const c = brushPreview.getContext('2d');
+  c.clearRect(0, 0, brushPreview.width, brushPreview.height);
+  const mid = brushPreview.width / 2;
+  drawStroke(c, [{ x: mid, y: mid }], strokeColor.value, Math.min(Number(strokeWidth.value), 30),
+    Number(strokeHardness.value) / 100);
+  document.getElementById('widthValue').textContent = `${strokeWidth.value} px`;
+  document.getElementById('hardnessValue').textContent = `${strokeHardness.value} %`;
+}
+[strokeWidth, strokeHardness, strokeColor].forEach((el) => el.addEventListener('input', updateBrushPreview));
+updateBrushPreview();
+
 // Arrondir au dixième de pixel : invisible à l'œil, mais le fichier de sauvegarde est bien plus léger
 const round1 = (v) => Math.round(v * 10) / 10;
 
 function finishStroke() {
   const pts = drawing;
   drawing = null;
+  // Une forme minuscule (simple clic sans tirer) : on ne garde rien
+  if (shape !== 'free') {
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    if (Math.max(...xs) - Math.min(...xs) < 3 && Math.max(...ys) - Math.min(...ys) < 3) {
+      draw();
+      return;
+    }
+  }
   const s = { id: 's' + nextStrokeId++, kind: tool, color: strokeColor.value, width: Number(strokeWidth.value) };
+  const hardness = Number(strokeHardness.value) / 100;
+  if (hardness < 1) s.hardness = hardness; // (bord net = valeur par défaut, pas besoin de l'écrire)
 
   if (tool === 'body') {
     // On accroche le trait à l'os le plus proche de son centre
@@ -1609,7 +1754,9 @@ function undoStroke() {
   const action = strokeHistory.pop();
   if (!action) return;
   undoAction(action);
-  if (action.type !== 'add') setStatus('↶ Suppression annulée');
+  const onlyAdds = action.type === 'add' || (action.type === 'group' && action.actions.every((a) => a.type === 'add'));
+  if (action.type === 'group' && onlyAdds) setStatus('↶ Collage annulé');
+  else if (!onlyAdds) setStatus('↶ Suppression annulée');
   afterStrokesChange();
 }
 
@@ -1718,6 +1865,62 @@ function deleteSelectedStrokes() {
 }
 
 delStrokeBtn.addEventListener('click', deleteSelectedStrokes);
+
+// --- Copier / coller des éléments ---
+// Le « presse-papier » garde une copie des traits sélectionnés, TELS QU'ON LES VOIT sur l'image
+// en cours (si une porte est ouverte ici, on copie la porte ouverte).
+let strokeClipboard = null; // liste de traits copiés (ou null)
+let pasteCount = 0;         // chaque collage est un peu plus décalé, pour ne pas s'empiler pile dessus
+const copyBtn = document.getElementById('copyBtn');
+const pasteBtn = document.getElementById('pasteBtn');
+
+function copyStrokes() {
+  const chosen = strokes.filter((s) => selectedStrokes.has(s.id));
+  if (chosen.length === 0) return;
+  strokeClipboard = chosen.map((s) => {
+    const copy = structuredClone(s);
+    if (s.kind === 'decor') {
+      // on « fige » la transformation de cette image dans les points (la copie démarre droite)
+      copy.points = strokeWorld(s, frame()).map((p) => ({ x: round1(p.x), y: round1(p.y) }));
+      copy.width = strokeWidthIn(s, frame());
+    }
+    return copy;
+  });
+  pasteCount = 0;
+  setStatus(`📋 ${chosen.length} élément(s) copié(s) : Cmd+V pour coller`);
+  updateToolbar();
+}
+
+function pasteStrokes() {
+  if (!strokeClipboard) return;
+  pasteCount += 1;
+  const OFFSET = 20 * pasteCount; // décalage en bas à droite
+  const actions = [];
+  const newIds = [];
+  for (const src of strokeClipboard) {
+    const s = structuredClone(src);
+    s.id = 's' + nextStrokeId++;
+    // (un trait du personnage reste accroché au même membre, décalé dans le repère de ce membre)
+    s.points = s.points.map((p) => ({ x: p.x + OFFSET, y: p.y + OFFSET }));
+    if (s.kind === 'decor') s.pivot = centerOf(s.points);
+    strokes.push(s);
+    // Comme un dessin : la copie apparaît à partir de l'image en cours
+    frames.forEach((f, i) => {
+      if (i < current) f.hiddenStrokes = [...(f.hiddenStrokes || []), s.id];
+    });
+    actions.push({ type: 'add', id: s.id });
+    newIds.push(s.id);
+  }
+  strokeHistory.push({ type: 'group', actions }); // Cmd+Z annule tout le collage d'un coup
+  // La copie collée est sélectionnée : on peut la tirer tout de suite où on veut
+  if (tool !== 'move') setTool('move');
+  selectedStrokes = new Set(newIds);
+  setStatus(`📄 ${newIds.length} élément(s) collé(s) : tire-les pour les placer`);
+  afterStrokesChange();
+}
+
+copyBtn.addEventListener('click', copyStrokes);
+pasteBtn.addEventListener('click', pasteStrokes);
 
 // Un trait apparaît sur toutes les images → on redessine tout, miniatures comprises
 function afterStrokesChange() {

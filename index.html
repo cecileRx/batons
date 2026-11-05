@@ -22,6 +22,11 @@
     #playBtn { min-width: 100px; font-weight: 600; }
     #status { color: #2a7a3a; min-width: 220px; }
     .toolbar button.tool.active { background: #ffe3e8; border-color: crimson; }
+    .toolbar button.shape.active { background: #e3edff; border-color: #2a6fdb; }
+    #drawBar .sep { width: 1px; height: 24px; background: #ccc; }
+    #widthValue, #hardnessValue { min-width: 38px; color: #555; font-size: 13px; }
+    #brushPreview { background: white; border: 1px solid #ddd; border-radius: 6px; }
+    #strokeHardness { width: 80px; }
     #strokeWidth { width: 80px; }
     #textProps { display: flex; gap: 8px; align-items: center; }
     #textProps[hidden] { display: none; }
@@ -69,10 +74,26 @@
     <button class="tool" data-tool="decor" title="Dessiner le décor : le même sur toutes les images (D)">🖌 Décor</button>
     <button class="tool" data-tool="erase" title="Passer sur un trait pour l'effacer de toutes les images (E)">🧽 Gomme</button>
     <button class="tool" data-tool="show" title="Passer sur un élément pour le cacher / le montrer à partir de cette image (H)">👁 Apparition</button>
-    <input id="strokeColor" type="color" value="#222222" title="Couleur du trait">
-    <label>Épaisseur <input id="strokeWidth" type="range" min="1" max="30" value="4"></label>
     <button id="undoStrokeBtn" title="Annuler le dernier trait, coup de gomme ou suppression (Cmd+Z)">↶ Annuler</button>
+    <button id="copyBtn" title="Copier les éléments sélectionnés (Cmd+C)">📋 Copier</button>
+    <button id="pasteBtn" title="Coller (Cmd+V)">📄 Coller</button>
     <button id="delStrokeBtn" title="Supprimer les éléments sélectionnés à partir de cette image (Suppr)">🗑 Élément</button>
+  </div>
+
+  <!-- Barre de dessin : formes automatiques et réglages de la brosse -->
+  <div class="toolbar" id="drawBar">
+    <button class="shape active" data-shape="free" title="Dessin à main levée">✍️ Main levée</button>
+    <button class="shape" data-shape="line" title="Trait droit (Maj : par pas de 45°)">╱ Trait</button>
+    <button class="shape" data-shape="rect" title="Rectangle (Maj : carré)">▭ Rectangle</button>
+    <button class="shape" data-shape="circle" title="Cercle : depuis le centre">◯ Cercle</button>
+    <button class="shape" data-shape="ellipse" title="Ovale (Maj : cercle)">⬭ Ovale</button>
+    <span class="sep"></span>
+    <input id="strokeColor" type="color" value="#222222" title="Couleur">
+    <label title="Diamètre de la brosse">Diamètre
+      <input id="strokeWidth" type="range" min="1" max="60" value="4"><span id="widthValue"></span></label>
+    <label title="Dureté : 100 % = bord net, plus bas = bord flou">Dureté
+      <input id="strokeHardness" type="range" min="0" max="100" value="100"><span id="hardnessValue"></span></label>
+    <canvas id="brushPreview" width="40" height="40" title="Aperçu de la brosse"></canvas>
   </div>
 
   <canvas id="scene" width="800" height="500"></canvas>
