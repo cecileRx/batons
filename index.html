@@ -29,12 +29,28 @@
                  border-radius: 6px; width: 160px; }
     #textSize, #textAngle, #textOpacity { width: 80px; }
 
-    /* Frise des images clés */
-    #timeline { display: flex; gap: 6px; max-width: 800px; overflow-x: auto;
-                padding: 4px; }
-    #timeline canvas { background: white; border: 2px solid transparent;
-                       border-radius: 4px; cursor: pointer; flex: none; }
-    #timeline canvas.active { border-color: crimson; }
+    /* Timeline : un bloc par image, sa largeur = sa durée */
+    #timeline { display: flex; gap: 4px; max-width: 800px; overflow-x: auto;
+                padding: 4px; align-items: flex-start; }
+    .frame-block { position: relative; flex: none; height: 75px; overflow: hidden;
+                   display: flex; align-items: center; justify-content: center;
+                   padding-right: 9px; box-sizing: border-box; /* place pour la poignée */
+                   background: white; border: 2px solid transparent; border-radius: 4px; }
+    .frame-block.active { border-color: crimson; }
+    .frame-block canvas { display: block; cursor: grab; touch-action: none; } /* glisser = réordonner */
+    .frame-block.dragging { opacity: .4; }
+    .frame-block.drop-before { box-shadow: -5px 0 0 #2a6fdb; }
+    .frame-block.drop-after { box-shadow: 5px 0 0 #2a6fdb; }
+    /* la durée écrite en bas du bloc (en bleu quand elle est propre à cette image) */
+    .frame-block .dur { position: absolute; left: 3px; bottom: 2px; font-size: 11px; color: #666;
+                        background: rgba(255, 255, 255, .85); padding: 0 3px; border-radius: 3px;
+                        pointer-events: none; white-space: nowrap; }
+    .frame-block .dur.custom { color: #2a6fdb; font-weight: 600; }
+    /* la poignée du bord droit : on la tire pour changer la durée */
+    .frame-block .resize { position: absolute; top: 0; right: 0; width: 9px; height: 100%;
+                           cursor: ew-resize; touch-action: none;
+                           background: linear-gradient(to right, transparent, rgba(42, 111, 219, .25)); }
+    .frame-block .resize:hover, .frame-block .resize.active { background: rgba(42, 111, 219, .55); }
   </style>
 </head>
 <body>

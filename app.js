@@ -480,28 +480,223 @@ function drawThumb(thumb, i) {
   drawFrame(c, frames[i]);
 }
 
+// ===== Durée des images =====
+// Chaque image peut avoir sa propre durée (frame.duration, en millisecondes) : le temps pour aller
+// de cette image à la suivante. Sans durée propre, elle prend celle du curseur « Durée entre deux images ».
+
+const PX_PER_SEC = 200;      // dans la timeline, 1 seconde = 200 pixels de large
+const MIN_DURATION = 50;     // 0,05 s
+const MAX_DURATION = 10000;  // 10 s
+
+function frameDuration(i) {
+  return frames[i].duration ?? Number(speed.value);
+}
+
+function blockWidth(i) {
+  return Math.max(MIN_BLOCK, (frameDuration(i) / 1000) * PX_PER_SEC);
+}
+
+const MIN_BLOCK = 44; // largeur minimale d'un bloc (0,10 s et moins) : la vignette y reste lisible
+const HANDLE_W = 9;   // largeur de la poignée du bord droit
+
+// Donne au bloc sa largeur et ajuste la vignette :
+//  - bloc assez large : on voit toute la scène ;
+//  - bloc étroit : on se recentre sur le BONHOMME (on coupe les côtés de la scène), et on ne
+//    réduit que s'il ne tient pas en entier. Il reste ainsi bien visible même à 0,10 s.
+function sizeBlock(block, i) {
+  const w = blockWidth(i);
+  block.style.width = `${w}px`;
+  const thumb = block.querySelector('canvas');
+  const fullW = canvas.width * THUMB_SCALE;
+  const fullH = canvas.height * THUMB_SCALE;
+  const inner = w - HANDLE_W - 4; // place disponible (bordures et poignée retirées)
+
+  if (inner >= fullW) {
+    Object.assign(thumb.style, { width: `${fullW}px`, position: '', left: '', top: '' });
+  } else {
+    const box = figureBox(frames[i].joints, figScale(frames[i])); // le bonhomme, dans la scène
+    const s = Math.min(1, inner / (box.w * THUMB_SCALE));         // réduire seulement si besoin
+    const centerX = (box.x + box.w / 2) * THUMB_SCALE * s;        // milieu du bonhomme dans la vignette
+    Object.assign(thumb.style, {
+      width: `${fullW * s}px`,
+      position: 'absolute',
+      left: `${2 + inner / 2 - centerX}px`,   // le bonhomme au milieu du bloc
+      top: `${(71 - fullH * s) / 2}px`,       // centrée en hauteur (75 px moins les bordures)
+    });
+  }
+
+  // La durée : écriture courte dans les blocs étroits (« 0.10 » au lieu de « 0.10 s »)
+  const label = block.querySelector('.dur');
+  const ms = frameDuration(i);
+  label.textContent = w < 64 ? (ms / 1000).toFixed(2) : formatDuration(ms);
+}
+
+function formatDuration(ms) {
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
+let thumbCanvases = []; // les vignettes, dans l'ordre (pour les redessiner)
+
 function renderTimeline() {
   timeline.innerHTML = '';
+  thumbCanvases = [];
   frames.forEach((_, i) => {
+    const block = document.createElement('div');
+    block.className = 'frame-block';
+    if (i === current) block.classList.add('active');
+    block.style.width = `${blockWidth(i)}px`;
+
     const thumb = document.createElement('canvas');
     thumb.width = canvas.width * THUMB_SCALE;
     thumb.height = canvas.height * THUMB_SCALE;
-    thumb.title = `Image ${i + 1}`;
-    if (i === current) thumb.classList.add('active');
-    thumb.addEventListener('click', () => { if (!playing) goTo(i); });
+    thumb.title = `Image ${i + 1} : clic pour y aller, glisser pour la déplacer`;
+    // Clic = aller à l'image ; glisser = la déplacer dans la timeline (voir plus bas)
+    thumb.addEventListener('pointerdown', (e) => startThumbDrag(e, block, i));
+
+    const label = document.createElement('span');
+    label.className = 'dur';
+    label.textContent = formatDuration(frameDuration(i));
+    if (frames[i].duration != null) label.classList.add('custom');
+
+    const handle = document.createElement('div');
+    handle.className = 'resize';
+    handle.title = 'Tirer pour changer la durée de CETTE image (double-clic : durée par défaut)';
+    handle.addEventListener('pointerdown', (e) => startResize(e, block, handle, label, i));
+    handle.addEventListener('dblclick', () => resetDuration(i));
+
+    block.append(thumb, label, handle);
+    sizeBlock(block, i);
     drawThumb(thumb, i);
-    timeline.appendChild(thumb);
+    thumbCanvases.push(thumb);
+    timeline.appendChild(block);
   });
   timeline.children[current].scrollIntoView({ block: 'nearest', inline: 'nearest' });
   updateToolbar();
 }
 
+// Tirer le bord droit d'un bloc : on change la durée de cette image seulement
+function startResize(e, block, handle, label, i) {
+  if (playing) return;
+  e.stopPropagation();
+  const startX = e.clientX;
+  const startDur = frameDuration(i);
+  handle.setPointerCapture(e.pointerId);
+  handle.classList.add('active');
+
+  const onMove = (ev) => {
+    let dur = startDur + ((ev.clientX - startX) / PX_PER_SEC) * 1000;
+    dur = Math.round(dur / 50) * 50; // par pas de 0,05 s
+    dur = Math.max(MIN_DURATION, Math.min(MAX_DURATION, dur));
+    frames[i].duration = dur;
+    label.classList.add('custom');
+    sizeBlock(block, i); // (met aussi à jour la durée écrite)
+    setStatus(`Image ${i + 1} : ${formatDuration(dur)}`, true);
+  };
+  const onUp = () => {
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onUp);
+    handle.removeEventListener('pointercancel', onUp);
+    handle.classList.remove('active');
+    setStatus(statusEl.textContent); // le message s'efface tout seul
+    scheduleSave();
+  };
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onUp);
+}
+
+// Double-clic sur la poignée : l'image reprend la durée par défaut
+function resetDuration(i) {
+  delete frames[i].duration;
+  setStatus(`Image ${i + 1} : durée par défaut (${formatDuration(frameDuration(i))})`);
+  renderTimeline();
+  scheduleSave();
+}
+
+// --- Réordonner les images en glissant les miniatures ---
+
+let thumbDrag = null; // { from, startX, moved, to }
+
+function startThumbDrag(e, thumb, i) {
+  if (playing) return;
+  thumbDrag = { from: i, startX: e.clientX, moved: false, to: i };
+  thumb.setPointerCapture(e.pointerId); // on suit la souris même hors de la miniature
+
+  const onMove = (ev) => {
+    // On ne commence à déplacer qu'après quelques pixels : sinon un clic tremblé déplacerait l'image
+    if (!thumbDrag.moved && Math.abs(ev.clientX - thumbDrag.startX) < 6) return;
+    thumbDrag.moved = true;
+    thumb.classList.add('dragging');
+    autoScrollTimeline(ev.clientX);
+    thumbDrag.to = dropIndexAt(ev.clientX);
+    showDropMarker(thumbDrag.to);
+  };
+
+  const onUp = () => {
+    thumb.removeEventListener('pointermove', onMove);
+    thumb.removeEventListener('pointerup', onUp);
+    thumb.removeEventListener('pointercancel', onUp);
+    const { from, moved, to } = thumbDrag;
+    thumbDrag = null;
+    if (!moved) goTo(from);   // simple clic
+    else moveFrame(from, to); // glisser-déposer
+  };
+
+  thumb.addEventListener('pointermove', onMove);
+  thumb.addEventListener('pointerup', onUp);
+  thumb.addEventListener('pointercancel', onUp);
+}
+
+// Où lâcher ? On renvoie la position d'insertion : 0 = avant la 1re image, n = après la dernière.
+// On compare la souris au milieu de chaque miniature.
+function dropIndexAt(clientX) {
+  const thumbs = [...timeline.children];
+  for (let k = 0; k < thumbs.length; k++) {
+    const r = thumbs[k].getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) return k;
+  }
+  return thumbs.length;
+}
+
+// Le trait bleu qui montre où l'image va s'insérer
+function showDropMarker(to) {
+  const thumbs = [...timeline.children];
+  thumbs.forEach((t) => t.classList.remove('drop-before', 'drop-after'));
+  if (to < thumbs.length) thumbs[to].classList.add('drop-before');
+  else thumbs[thumbs.length - 1].classList.add('drop-after');
+}
+
+// Si on approche du bord de la frise, elle défile (pratique avec beaucoup d'images)
+function autoScrollTimeline(clientX) {
+  const r = timeline.getBoundingClientRect();
+  if (clientX < r.left + 30) timeline.scrollLeft -= 12;
+  else if (clientX > r.right - 30) timeline.scrollLeft += 12;
+}
+
+// Déplace l'image n° from à la position d'insertion to
+function moveFrame(from, to) {
+  // Après avoir retiré l'image, les positions situées après elle reculent d'une case
+  const dest = to > from ? to - 1 : to;
+  if (dest === from) {
+    renderTimeline(); // lâchée à sa place : on efface juste le trait bleu
+    return;
+  }
+  const [f] = frames.splice(from, 1);
+  frames.splice(dest, 0, f);
+  current = dest; // on reste sur l'image qu'on vient de déplacer
+  setStatus(`Image ${from + 1} déplacée en position ${dest + 1}`);
+  draw();
+  renderTimeline();
+  updateTextPanel();
+}
+
 function refreshCurrentThumb() {
-  drawThumb(timeline.children[current], current);
+  drawThumb(thumbCanvases[current], current);
+  sizeBlock(timeline.children[current], current); // (le cadrage suit le bonhomme s'il s'est déplacé)
 }
 
 function refreshAllThumbs() {
-  [...timeline.children].forEach((t, i) => drawThumb(t, i));
+  thumbCanvases.forEach((t, i) => drawThumb(t, i));
 }
 
 function goTo(i) {
@@ -513,7 +708,9 @@ function goTo(i) {
 
 // Nouvelle image = copie complète de l'image actuelle (bonhomme ET textes), insérée juste après
 function addFrame() {
-  frames.splice(current + 1, 0, structuredClone(frame()));
+  const copy = structuredClone(frame());
+  delete copy.duration; // une durée réglée ne vaut que pour SON image : la copie prend la durée par défaut
+  frames.splice(current + 1, 0, copy);
   goTo(current + 1);
 }
 
@@ -669,7 +866,8 @@ const loop = document.getElementById('loop');
 const smooth = document.getElementById('smooth');
 
 let playing = false;
-let playPos = 0;    // position dans l'animation : 2.25 = un quart du chemin entre l'image 3 et l'image 4
+let playI = 0;      // l'image clé de départ de la transition en cours
+let playT = 0;      // l'avancement vers l'image suivante (0 → 1)
 let lastTime = 0;   // horodatage du tick précédent
 let rafId = null;
 
@@ -748,6 +946,8 @@ function showSpeed() {
   speedValue.textContent = `${(speed.value / 1000).toFixed(2)} s`;
 }
 speed.addEventListener('input', showSpeed);
+// La durée par défaut change : les blocs des images sans durée propre s'élargissent / rétrécissent
+speed.addEventListener('input', () => { if (!playing) renderTimeline(); });
 showSpeed();
 
 function highlightThumb(i) {
@@ -756,24 +956,37 @@ function highlightThumb(i) {
 
 function tick(now) {
   const n = frames.length;
-  // Nombre de transitions : une par image (en boucle, la dernière revient vers la première ;
-  // sans boucle, la dernière est tenue — voir nextIndex)
-  const segments = n;
+  // Une transition par image, chacune avec SA durée (en boucle, la dernière revient vers la
+  // première ; sans boucle, la dernière est tenue — voir nextIndex)
 
   // On avance selon le temps écoulé : la vitesse reste la même quelle que soit la puissance de l'ordi
   // Math.max(0, …) : l'horodatage de requestAnimationFrame peut être un poil AVANT performance.now()
   // → temps négatif → image n° -1 → plantage. On l'empêche.
-  playPos += Math.max(0, now - lastTime) / Number(speed.value);
+  let dt = Math.max(0, now - lastTime);
   lastTime = now;
 
-  if (!loop.checked && playPos >= segments) {
-    stopPlayback(n - 1); // fin de l'animation : on s'arrête sur la dernière image
-    return;
+  // On consomme le temps écoulé image par image (une image courte peut être « sautée » en un tick)
+  while (dt > 0) {
+    const left = (1 - playT) * frameDuration(playI); // temps restant pour finir cette transition
+    if (dt < left) {
+      playT += dt / frameDuration(playI);
+      dt = 0;
+    } else {
+      dt -= left;
+      playT = 0;
+      playI += 1;
+      if (playI >= n) {
+        if (!loop.checked) {
+          stopPlayback(n - 1); // fin de l'animation : on s'arrête sur la dernière image
+          return;
+        }
+        playI = 0;
+      }
+    }
   }
-  playPos %= segments;
 
-  const i = Math.floor(playPos);        // image clé de départ
-  let t = playPos - i;                  // avancement vers la suivante (0 → 1)
+  const i = playI;                      // image clé de départ
+  let t = playT;                        // avancement vers la suivante (0 → 1)
   if (smooth.checked) t = ease(t);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -788,8 +1001,9 @@ function tick(now) {
 function startPlayback() {
   if (exporting || frames.length < 2) return;
   playing = true;
-  playPos = current;                 // on démarre depuis l'image sélectionnée
-  if (!loop.checked && current === frames.length - 1) playPos = 0; // déjà au bout : on repart du début
+  playI = current;                   // on démarre depuis l'image sélectionnée
+  playT = 0;
+  if (!loop.checked && current === frames.length - 1) playI = 0; // déjà au bout : on repart du début
   lastTime = performance.now();
   canvas.style.cursor = 'default';
   updateToolbar();
@@ -797,7 +1011,7 @@ function startPlayback() {
 }
 
 // À l'arrêt, on revient en mode édition sur l'image clé où on en était
-function stopPlayback(onFrame = Math.floor(playPos)) {
+function stopPlayback(onFrame = playI) {
   playing = false;
   cancelAnimationFrame(rafId);
   goTo(onFrame);
@@ -1581,6 +1795,8 @@ function loadProject(data) {
       scale: f.scale ?? 1,
       hiddenStrokes: Array.isArray(f.hiddenStrokes) ? f.hiddenStrokes : [],
       strokeTf: f.strokeTf && typeof f.strokeTf === 'object' ? f.strokeTf : {},
+      // durée propre à cette image (sinon : durée par défaut)
+      ...(typeof f.duration === 'number' && f.duration > 0 ? { duration: f.duration } : {}),
     });
   }
   for (const id in textDefs) delete textDefs[id];
@@ -1711,9 +1927,17 @@ async function exportVideo() {
   const c = out.getContext('2d');
 
   const n = frames.length;
-  const segments = n; // comme la lecture (voir nextIndex)
-  const segMs = Number(speed.value);
-  const totalMs = segments * segMs;
+  // Durée totale = la somme des durées de chaque image (comme la lecture, voir nextIndex)
+  const durations = frames.map((_, i) => frameDuration(i));
+  const totalMs = durations.reduce((a, b) => a + b, 0);
+  // Temps écoulé → position dans l'animation (ex. 2.25 = un quart du chemin de l'image 3 à la 4)
+  const posAt = (ms) => {
+    for (let i = 0; i < n; i++) {
+      if (ms < durations[i]) return i + ms / durations[i];
+      ms -= durations[i];
+    }
+    return n - 1e-6;
+  };
 
   const recorder = new MediaRecorder(out.captureStream(30), { mimeType: mime, videoBitsPerSecond: 4_000_000 });
   const chunks = [];
@@ -1737,7 +1961,7 @@ async function exportVideo() {
         resolve();
         return;
       }
-      renderAt(c, elapsed / segMs);
+      renderAt(c, posAt(elapsed));
       // On affiche aussi l'animation dans la scène pour voir où en est l'export
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(out, 0, 0);
