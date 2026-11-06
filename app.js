@@ -34,6 +34,32 @@ function figScale(f) {
   return f.scale ?? 1;
 }
 
+// ===== Plusieurs bonshommes =====
+// Le bonhomme n° 1 ('b1') est rangé directement dans l'image : frame.joints et frame.scale
+// (comme avant : les anciens fichiers restent valables).
+// Les autres sont rangés dans frame.others = { b2: { joints, scale }, ... }, et SEULEMENT sur les
+// images où ils sont présents : un bonhomme ajouté à l'image 5 n'existe pas sur les images 1 à 4.
+const FIG_COLORS = ['#222', '#2a6fdb', '#1e9e5a', '#d9822b', '#8e44ad', '#c0392b'];
+const DOT_COLORS = ['crimson', '#f39c12', '#e84393', '#16a085', '#2980b9', '#7f8c8d'];
+let figureDefs = {};   // { b2: { color, dot, n } } : ce qui est PAREIL sur toutes les images
+let nextFigId = 2;
+let activeFig = 'b1';  // le bonhomme qu'on modifie (et sur lequel le crayon ✏️ dessine)
+
+// Les données d'un bonhomme sur une image ({ joints, scale }), ou null s'il n'y est pas
+function figOf(f, id) {
+  if (id === 'b1') return f;
+  return (f.others && f.others[id]) || null;
+}
+function figIds() {
+  return ['b1', ...Object.keys(figureDefs)];
+}
+function figColor(id) {
+  return id === 'b1' ? FIG_COLORS[0] : figureDefs[id].color;
+}
+function figName(id) {
+  return id === 'b1' ? 'Bonhomme 1' : `Bonhomme ${figureDefs[id].n}`;
+}
+
 // Dessine le bonhomme sur n'importe quel canvas (la scène ou une miniature).
 // color : couleur du trait ; scale : taille du bonhomme (1 = normale), pour la tête et l'épaisseur
 function drawFigure(c, joints, color = '#222', scale = 1) {
@@ -54,11 +80,12 @@ function drawFigure(c, joints, color = '#222', scale = 1) {
 }
 
 // Les points rouges des articulations (seulement en édition)
-function drawJointDots(c, joints) {
-  c.fillStyle = 'crimson';
+// (chaque bonhomme a sa couleur de points ; ceux du bonhomme actif sont un peu plus gros)
+function drawJointDots(c, joints, color = 'crimson', radius = 5) {
+  c.fillStyle = color;
   for (const name in joints) {
     c.beginPath();
-    c.arc(joints[name].x, joints[name].y, 5, 0, Math.PI * 2);
+    c.arc(joints[name].x, joints[name].y, radius, 0, Math.PI * 2);
     c.fill();
   }
 }
@@ -172,14 +199,18 @@ function strokeWorld(s, f) {
       return { x: P.x + lx * cos - ly * sin, y: P.y + lx * sin + ly * cos };
     });
   }
-  const scale = figScale(f);
-  const bf = boneFrame(f.joints, s.bone, s.anchor);
+  // Trait du personnage : il suit SON bonhomme (s.fig ; absent = bonhomme 1).
+  // Si ce bonhomme n'est pas sur cette image, le trait n'y est pas non plus.
+  const fd = figOf(f, s.fig || 'b1');
+  if (!fd) return [];
+  const scale = figScale(fd);
+  const bf = boneFrame(fd.joints, s.bone, s.anchor);
   return s.points.map((q) => toWorld({ x: q.x * scale, y: q.y * scale }, bf));
 }
 
 // Épaisseur d'un trait sur une image (il s'épaissit si on l'agrandit)
 function strokeWidthIn(s, f) {
-  if (s.kind === 'body') return s.width * figScale(f);
+  if (s.kind === 'body') return s.width * figScale(figOf(f, s.fig || 'b1') || f);
   const t = tfOf(f, s.id);
   return s.width * Math.sqrt(Math.abs(t.sx * t.sy));
 }
@@ -489,6 +520,7 @@ function drawFrame(c, f, { showJoints = false, ghost = null, minAlpha = 0 } = {}
   // (pour qu'on puisse le retrouver avec l'outil 👁 Apparition)
   const paint = (s, pts, color, width) => {
     const hardness = s.hardness ?? 1; // dureté de la brosse (les anciens traits : nets)
+    if (pts.length === 0) return;     // trait d'un bonhomme absent de cette image
     if (strokeVisible(f, s)) {
       drawStroke(c, pts, color, width, hardness);
     } else if (editing) {
@@ -504,13 +536,23 @@ function drawFrame(c, f, { showJoints = false, ghost = null, minAlpha = 0 } = {}
   for (const s of strokes) {
     if (s.kind === 'decor') paint(s, strokeWorld(s, f), ghost || s.color, strokeWidthIn(s, f));
   }
-  const scale = figScale(f);
-  drawFigure(c, f.joints, ghost || '#222', scale);
+  // Les bonshommes présents sur cette image
+  for (const id of figIds()) {
+    const fd = figOf(f, id);
+    if (fd) drawFigure(c, fd.joints, ghost || figColor(id), figScale(fd));
+  }
   for (const s of strokes) {
     if (s.kind === 'body') paint(s, strokeWorld(s, f), ghost || s.color, strokeWidthIn(s, f));
   }
   for (const id in textDefs) drawText(c, id, f.texts[id], ghost, minAlpha);
-  if (showJoints) drawJointDots(c, f.joints);
+  if (showJoints) {
+    for (const id of figIds()) {
+      const fd = figOf(f, id);
+      if (!fd) continue;
+      const dot = id === 'b1' ? DOT_COLORS[0] : figureDefs[id].dot;
+      drawJointDots(c, fd.joints, dot, id === activeFig ? 6 : 4.5);
+    }
+  }
 }
 
 // ===== Étape 3 : les images clés =====
@@ -520,7 +562,33 @@ const frames = [{ joints: structuredClone(startPose), texts: {} }];
 let current = 0; // l'image affichée et modifiée
 
 function frame() { return frames[current]; }
-function pose() { return frames[current].joints; }
+// Le bonhomme actif sur l'image en cours ({ joints, scale }) et sa pose
+function cur() { return figOf(frame(), activeFig) || frame(); }
+function pose() { return cur().joints; }
+
+// Deux états de bonhomme identiques ? (pose et taille, à un centième près)
+function sameFig(a, b) {
+  if (!a || !b) return false;
+  if (Math.abs(figScale(a) - figScale(b)) > 0.001) return false;
+  return Object.keys(a.joints).every((n) =>
+    Math.abs(a.joints[n].x - b.joints[n].x) < 0.01 && Math.abs(a.joints[n].y - b.joints[n].y) < 0.01);
+}
+
+// Fin d'un geste sur un bonhomme ajouté (b2…) : les images SUIVANTES qui avaient encore
+// l'ancienne pose prennent la nouvelle. On s'arrête à la première image où il était déjà
+// posé autrement : une animation déjà faite n'est jamais écrasée (même règle que le décor).
+function propagateFigureForward(id, before) {
+  if (id === 'b1' || !before) return;
+  const after = figOf(frame(), id);
+  if (!after || sameFig(before, after)) return;
+  let changed = false;
+  for (let j = current + 1; j < frames.length; j++) {
+    if (!sameFig(figOf(frames[j], id), before)) break;
+    frames[j].others[id] = structuredClone({ joints: after.joints, scale: figScale(after) });
+    changed = true;
+  }
+  if (changed) refreshAllThumbs();
+}
 
 // ===== Étape 5 : la pelure d'oignon =====
 const onion = document.getElementById('onion');
@@ -784,6 +852,11 @@ function refreshAllThumbs() {
 
 function goTo(i) {
   current = Math.max(0, Math.min(frames.length - 1, i));
+  // Le bonhomme actif n'est pas sur cette image : on revient au bonhomme 1
+  if (!figOf(frame(), activeFig)) {
+    activeFig = 'b1';
+    figureSelected = false;
+  }
   draw();
   renderTimeline();
   updateTextPanel(); // les réglages du texte dépendent de l'image
@@ -825,10 +898,60 @@ function updateToolbar() {
   toolButtons.forEach((b) => { b.disabled = playing; });
   undoStrokeBtn.disabled = playing || strokeHistory.length === 0;
   delStrokeBtn.disabled = playing || selectedStrokes.size === 0;
+  addFigBtn.disabled = playing;
+  delFigBtn.hidden = activeFig === 'b1';
+  delFigBtn.disabled = playing;
   copyBtn.disabled = playing || selectedStrokes.size === 0;
   pasteBtn.disabled = playing || !strokeClipboard;
   textProps.querySelectorAll('input, button').forEach((el) => { el.disabled = playing; });
 }
+
+// --- Ajouter / retirer un bonhomme ---
+const addFigBtn = document.getElementById('addFigBtn');
+const delFigBtn = document.getElementById('delFigBtn');
+
+// Un nouveau bonhomme apparaît À PARTIR de l'image actuelle (pas sur les images d'avant),
+// à côté du bonhomme 1, dans la pose de départ
+function addFigure() {
+  const id = 'b' + nextFigId;
+  const k = Object.keys(figureDefs).length + 1; // 1er bonhomme ajouté → 2e couleur…
+  figureDefs[id] = { color: FIG_COLORS[k % FIG_COLORS.length], dot: DOT_COLORS[k % DOT_COLORS.length], n: nextFigId };
+  nextFigId += 1;
+  // À droite du bonhomme 1 s'il est à gauche de la scène, sinon à gauche
+  const dx = frame().joints.cou.x < canvas.width / 2 + 60 ? 220 : -220;
+  const joints = {};
+  for (const name in startPose) joints[name] = { x: startPose[name].x + dx, y: startPose[name].y };
+  for (let i = current; i < frames.length; i++) {
+    frames[i].others = { ...(frames[i].others || {}), [id]: { joints: structuredClone(joints), scale: 1 } };
+  }
+  activeFig = id;
+  selectFigure();
+  setStatus(`＋ ${figName(id)} ajouté à partir de l'image ${current + 1} : tire ses points pour le poser`);
+  renderTimeline();
+}
+
+// Retire le bonhomme actif à partir de cette image (il reste sur les images d'avant).
+// S'il n'est plus sur aucune image, on l'efface complètement, avec ses traits ✏️.
+function deleteFigure() {
+  const id = activeFig;
+  if (id === 'b1') return;
+  const name = figName(id);
+  for (let i = current; i < frames.length; i++) {
+    if (frames[i].others) delete frames[i].others[id];
+  }
+  if (!frames.some((f) => figOf(f, id))) {
+    delete figureDefs[id];
+    strokes = strokes.filter((s) => s.fig !== id);
+  }
+  activeFig = 'b1';
+  figureSelected = false;
+  setStatus(current === 0 ? `🗑 ${name} retiré` : `🗑 ${name} retiré à partir de l'image ${current + 1}`);
+  draw();
+  renderTimeline();
+}
+
+addFigBtn.addEventListener('click', addFigure);
+delFigBtn.addEventListener('click', deleteFigure);
 
 prevBtn.addEventListener('click', () => goTo(current - 1));
 nextBtn.addEventListener('click', () => goTo(current + 1));
@@ -983,11 +1106,23 @@ function lerpFrame(a, b, t) {
       sy: lerp(ta.sy, tb.sy, t),
     };
   }
-  for (const name in a.joints) {
-    out.joints[name] = {
-      x: lerp(a.joints[name].x, b.joints[name].x, t),
-      y: lerp(a.joints[name].y, b.joints[name].y, t),
-    };
+  const lerpJoints = (ja, jb) => {
+    const o = {};
+    for (const name in ja) o[name] = { x: lerp(ja[name].x, jb[name].x, t), y: lerp(ja[name].y, jb[name].y, t) };
+    return o;
+  };
+  out.joints = lerpJoints(a.joints, b.joints);
+  // Les autres bonshommes : ils bougent s'ils sont sur les deux images ; sinon ils restent
+  // tels quels jusqu'à l'image clé (un bonhomme apparaît / disparaît d'un coup)
+  if (a.others) {
+    out.others = {};
+    for (const id in a.others) {
+      const fa = a.others[id];
+      const fb = b.others && b.others[id];
+      out.others[id] = fb
+        ? { joints: lerpJoints(fa.joints, fb.joints), scale: lerp(figScale(fa), figScale(fb), t) }
+        : fa;
+    }
   }
   for (const id in a.texts) {
     const sa = a.texts[id];
@@ -1157,6 +1292,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Delete' || e.key === 'Backspace') {
     // Des éléments sélectionnés ? On les supprime. Sinon, Suppr supprime l'image (comme avant).
     if (selectedStrokes.size > 0) deleteSelectedStrokes();
+    else if (figureSelected && activeFig !== 'b1') deleteFigure(); // bonhomme ajouté sélectionné
     else deleteFrame();
   }
 });
@@ -1175,15 +1311,35 @@ function mousePos(e) {
   };
 }
 
-// Trouve l'articulation la plus proche du point p (si assez proche)
+// Trouve l'articulation la plus proche du point p (si assez proche), parmi tous les bonshommes
+// de l'image → { fig, name } ou null. À égalité, le bonhomme actif passe en premier.
 function jointAt(p) {
   let best = null;
   let bestDist = GRAB_RADIUS;
-  for (const name in pose()) {
-    const d = Math.hypot(pose()[name].x - p.x, pose()[name].y - p.y);
-    if (d <= bestDist) { best = name; bestDist = d; }
+  const ids = [activeFig, ...figIds().filter((id) => id !== activeFig)];
+  for (const fig of ids) {
+    const fd = figOf(frame(), fig);
+    if (!fd) continue;
+    for (const name in fd.joints) {
+      const d = Math.hypot(fd.joints[name].x - p.x, fd.joints[name].y - p.y);
+      if (d < bestDist) { best = { fig, name }; bestDist = d; }
+    }
   }
   return best;
+}
+
+// Rend un bonhomme actif (c'est lui qu'on bouge, et sur lui que le crayon ✏️ dessine)
+function setActiveFig(id) {
+  if (id === activeFig) return;
+  activeFig = id;
+  figureSelected = false;
+  if (figIds().length > 1) setStatus(`${figName(id)} actif`);
+  updateToolbar();
+}
+
+// L'état d'un bonhomme ajouté au début d'un geste (pour faire suivre les images suivantes)
+function figSnapshot() {
+  return activeFig === 'b1' ? null : structuredClone({ joints: pose(), scale: figScale(cur()) });
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -1222,14 +1378,15 @@ canvas.addEventListener('pointerdown', (e) => {
       start: p,
       center: { x: b.x + b.w / 2, y: b.y + b.h / 2 }, // on agrandit / tourne autour du centre
       origJoints: structuredClone(pose()),         // la pose AVANT le geste : on recalcule
-      origScale: figScale(frame()),                // toujours depuis elle (pas d'erreurs cumulées)
+      origScale: figScale(cur()),                  // toujours depuis elle (pas d'erreurs cumulées)
+      figBefore: figSnapshot(),
     };
     canvas.setPointerCapture(e.pointerId);
     return;
   }
   // … puis un clic dans le cadre le déplace en bloc
   if (figureSelected && insideBox(p, figureBox(pose()))) {
-    dragged = { kind: 'figure', last: p };
+    dragged = { kind: 'figure', last: p, figBefore: figSnapshot() };
     canvas.setPointerCapture(e.pointerId);
     return;
   }
@@ -1250,7 +1407,8 @@ canvas.addEventListener('pointerdown', (e) => {
   // Les articulations sont prioritaires (elles sont petites, dur de les attraper sinon)
   const joint = jointAt(p);
   if (joint) {
-    dragged = { kind: 'joint', name: joint };
+    setActiveFig(joint.fig); // toucher un point d'un bonhomme le rend actif
+    dragged = { kind: 'joint', name: joint.name, figBefore: figSnapshot() };
     clearStrokeSelection();
   } else {
     const id = textAt(p);
@@ -1341,8 +1499,8 @@ canvas.addEventListener('pointermove', (e) => {
         pose()[name].x = c.x + (origJoints[name].x - c.x) * factor;
         pose()[name].y = c.y + (origJoints[name].y - c.y) * factor;
       }
-      frame().scale = origScale * factor;
-      setStatus(`Taille ×${frame().scale.toFixed(2)}`, true);
+      cur().scale = origScale * factor;
+      setStatus(`Taille ×${cur().scale.toFixed(2)}`, true);
     } else if (dragged.kind === 'rotate') {
       // Angle = angle de la souris autour du centre, moins l'angle au début du geste
       const { center: c, start, origJoints } = dragged;
@@ -1411,7 +1569,7 @@ canvas.addEventListener('pointermove', (e) => {
 let figureSelected = false;
 
 // Le rectangle qui entoure le bonhomme (on tient compte du rayon de la tête)
-function figureBox(joints, scale = figScale(frame())) {
+function figureBox(joints, scale = figScale(cur())) {
   const HEAD = HEAD_RADIUS * scale;
   const PAD = 12;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -1480,18 +1638,36 @@ function selectFigure() {
   if (tool !== 'move') setTool('move');
   selectText(null);
   figureSelected = true;
-  setStatus('Bonhomme sélectionné : tire pour déplacer, ■ pour agrandir, ● pour tourner (Échap pour finir)');
+  const who = figIds().length > 1 ? figName(activeFig) : 'Bonhomme';
+  const del = activeFig === 'b1' ? '' : ', Suppr pour le retirer à partir d’ici';
+  setStatus(`${who} sélectionné : tire pour déplacer, ■ pour agrandir, ● pour tourner${del} (Échap pour finir)`);
+  updateToolbar();
   draw();
 }
 
-// Double-clic sur le bonhomme : le sélectionne en entier (pratique aussi sur tablette)
+// Double-clic sur un bonhomme : le sélectionne en entier (pratique aussi sur tablette).
+// Plusieurs bonshommes sous la souris : le plus petit cadre gagne (celui qu'on vise vraiment).
 canvas.addEventListener('dblclick', (e) => {
   if (playing || tool !== 'move') return;
-  if (insideBox(mousePos(e), figureBox(pose()))) selectFigure();
+  const p = mousePos(e);
+  let best = null;
+  let bestArea = Infinity;
+  for (const id of figIds()) {
+    const fd = figOf(frame(), id);
+    if (!fd) continue;
+    const b = figureBox(fd.joints, figScale(fd));
+    if (insideBox(p, b) && b.w * b.h < bestArea) { best = id; bestArea = b.w * b.h; }
+  }
+  if (best) {
+    activeFig = best;
+    selectFigure();
+  }
 });
 
 canvas.addEventListener('pointerup', () => {
   if (drawing) finishStroke();
+  // Fin d'un geste sur un bonhomme ajouté : les images suivantes identiques suivent
+  if (dragged && dragged.figBefore) propagateFigureForward(activeFig, dragged.figBefore);
   // Fin d'un geste agrandir / tourner : le message (taille, angle) s'efface tout seul
   if (dragged && dragged.kind === 'decor') propagateDecorForward(dragged.orig);
   if (dragged && (dragged.kind === 'scale' || dragged.kind === 'rotate' || dragged.kind === 'decor')) {
@@ -1541,7 +1717,9 @@ function setTool(name) {
     clearStrokeSelection();
   }
   canvas.style.cursor = name === 'move' ? 'default' : 'crosshair';
-  if (toolHints[name]) setStatus(toolHints[name]);
+  if (name === 'body' && figIds().length > 1) {
+    setStatus(`✏️ Tu dessines sur le ${figName(activeFig)} (touche un point d’un autre bonhomme avec ✋ pour changer)`);
+  } else if (toolHints[name]) setStatus(toolHints[name]);
   draw(); // les points rouges ne s'affichent qu'avec l'outil « Bouger »
 }
 
@@ -1610,9 +1788,10 @@ function finishStroke() {
     s.anchor = dB < dA ? 1 : 0;
     const f = boneFrame(pose(), s.bone, s.anchor);
     // On range le trait « à taille 1 » : s'il est dessiné sur un bonhomme agrandi, on divise
-    const k = figScale(frame());
+    const k = figScale(cur());
     s.points = pts.map((p) => toLocal(p, f)).map((q) => ({ x: q.x / k, y: q.y / k }));
     s.width = s.width / k;
+    if (activeFig !== 'b1') s.fig = activeFig; // accroché au bonhomme actif (sélectionné)
   } else {
     s.points = pts;
   }
@@ -1833,7 +2012,8 @@ function finishMarquee({ start: a, end: b, additive }) {
   if (box.w < 4 && box.h < 4) { draw(); return; } // simple clic dans le vide, pas un cadre
   if (!additive) selectedStrokes = new Set();
   for (const s of strokes) {
-    if (strokeWorld(s, frame()).every((p) => insideBox(p, box))) selectedStrokes.add(s.id);
+    const pts = strokeWorld(s, frame());
+    if (pts.length && pts.every((p) => insideBox(p, box))) selectedStrokes.add(s.id);
   }
   showStrokeSelection();
   draw();
@@ -1956,6 +2136,8 @@ function projectData() {
     textDefs,
     nextTextId,
     strokes,
+    figures: figureDefs, // les bonshommes ajoutés (couleur, numéro)
+    nextFigId,
     settings: { speed: Number(speed.value), loop: loop.checked, smooth: smooth.checked },
   };
 }
@@ -1980,6 +2162,20 @@ function loadProject(data) {
   }
   const defs = data.textDefs || {};
 
+  // Les bonshommes ajoutés (absents des fichiers d'avant)
+  const figs = data.figures && typeof data.figures === 'object' ? data.figures : {};
+  const othersOf = (f) => {
+    if (!f.others || typeof f.others !== 'object') return null;
+    const o = {};
+    for (const id in f.others) {
+      const fd = f.others[id];
+      if (figs[id] && fd && fd.joints && Object.keys(startPose).every((n) => fd.joints[n])) {
+        o[id] = { joints: fd.joints, scale: fd.scale ?? 1 };
+      }
+    }
+    return Object.keys(o).length ? o : null;
+  };
+
   // On remplace le contenu (frames et textDefs sont des « const » : on les vide puis on les remplit)
   frames.length = 0;
   for (const f of data.frames) {
@@ -1998,6 +2194,8 @@ function loadProject(data) {
       scale: f.scale ?? 1,
       hiddenStrokes: Array.isArray(f.hiddenStrokes) ? f.hiddenStrokes : [],
       strokeTf: f.strokeTf && typeof f.strokeTf === 'object' ? f.strokeTf : {},
+      // les bonshommes ajoutés présents sur cette image (seulement ceux dont la pose est complète)
+      ...(othersOf(f) ? { others: othersOf(f) } : {}),
       // durée propre à cette image (sinon : durée par défaut)
       ...(typeof f.duration === 'number' && f.duration > 0 ? { duration: f.duration } : {}),
     });
@@ -2005,12 +2203,16 @@ function loadProject(data) {
   for (const id in textDefs) delete textDefs[id];
   Object.assign(textDefs, defs);
   nextTextId = data.nextTextId || Object.keys(defs).length + 1;
+  figureDefs = figs;
+  nextFigId = data.nextFigId || Object.keys(figs).length + 2;
+  activeFig = 'b1';
+  figureSelected = false;
 
   // Les traits (absents des fichiers enregistrés avant l'outil de dessin)
   strokes = (Array.isArray(data.strokes) ? data.strokes : []).filter((s) =>
     Array.isArray(s.points) && s.points.length > 0 &&
     (s.kind === 'decor' || (s.kind === 'body' && Array.isArray(s.bone) &&
-      s.bone.every((name) => name in startPose))));
+      s.bone.every((name) => name in startPose) && (!s.fig || figs[s.fig]))));
   // Les traits des anciens fichiers n'ont pas d'identifiant : on leur en donne un
   let maxId = 0;
   for (const s of strokes) {
